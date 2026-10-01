@@ -9,162 +9,248 @@
 
 ---
 
-## 1. What We Are Doing (In Brief)
+## 📑 Contents
 
-**HiveMind** is an open-source distributed orchestrator for autonomous AI coding agents.
+* [1. Overview](#1-overview)
+* [2. Key Features](#2-key-features)
+* [3. Installation & Setup](#3-installation--setup)
+* [4. How to Run the `hive` CLI](#4-how-to-run-the-hive-cli)
+* [5. SSH Setup & Troubleshooting Guide](#5-ssh-setup--troubleshooting-guide)
+  * [Is it necessary to open Port 22?](#is-it-necessary-to-open-port-22)
+  * [How to Enable SSH & Open Port 22 on Worker Machines](#how-to-enable-ssh--open-port-22-on-worker-machines)
+  * [Configuring Passwordless SSH Authentication](#configuring-passwordless-ssh-authentication)
+  * [Using `~/.ssh/config` Host Aliases or Cloudflare Tunnels](#using-sshconfig-host-aliases-or-cloudflare-tunnels)
+* [6. Project Documentation](#6-project-documentation)
+* [7. Contributing & Community](#7-contributing--community)
+* [8. License](#8-license)
+
+---
+
+## 1. Overview
+
+**HiveMind** (CLI: `hive`, Package: `hivemind`) is an open-source distributed orchestrator for autonomous AI coding agents.
 
 Instead of relying on a single AI agent working sequentially on one computer, HiveMind coordinates your existing fleet of machines (GPU workstations, cloud instances, and laptops) into an autonomous development team:
 
-* **The Master Machine (Lead Architect):** Decomposes your high-level engineering goal into distinct implementation strategies and delegates them across available worker machines.
-* **The Worker Machines (Developer Fleet):** Run independent, headless AI coding sessions (Claude Code, Antigravity CLI `agy`, Aider) in isolated Git branches. Each machine writes code, builds, and executes test suites on its local hardware.
-* **The Synthesizer Engine:** Evaluates candidate solutions, prunes dead-end attempts early, shares real-time discoveries between workers, and merges the winning code—or combines the best parts of multiple branches—into your main codebase.
+* **Master Node (Lead Architect):** Decomposes your high-level engineering goal into distinct implementation strategies and delegates them across available worker machines.
+* **Worker Fleet (Developer Fleet):** Run independent, headless AI coding sessions (Claude Code, Antigravity CLI `agy`, Aider) in isolated Git branches. Each machine writes code, builds, and executes test suites on its local hardware.
+* **Synthesizer Engine:** Evaluates candidate solutions, prunes dead-end attempts early, shares real-time discoveries between workers, and merges the winning code—or combines the best parts of multiple branches—into your main codebase.
 
 ---
 
-## 2. The Problem: Why Single-Agent Development Hits a Wall
+## 2. Key Features
 
-Frontier AI coding agents are extraordinarily capable, but when applied to compute-heavy, performance-critical, or time-sensitive projects, the **single-machine, single-agent model breaks down**:
-
-1. **The Sequential Trial-and-Error Bottleneck:** Complex engineering challenges (e.g., optimizing database throughput, deep refactoring, fixing race conditions) rarely have an obvious single solution. A single agent tries Approach A, gets stuck after 20 minutes, rolls back, and tries Approach B. Exploring three distinct approaches sequentially can easily take over an hour.
-2. **Idle Computing Power:** Many developers and teams have access to multiple machines—a high-end workstation with a dedicated GPU, a multi-core cloud VPS, and a development laptop. Under existing tools, all but one machine sit completely idle while you wait on a single thread of execution.
-3. **No Safety in Long-Horizon Tasks:** If a single agent wanders down a flawed design path or gets caught in a circular compiler error loop, the entire development session is wasted.
-
----
-
-## 3. Current Solutions in the Market
-
-The current landscape of AI development tools falls into three primary categories:
-
-* **Single-Machine Coding CLIs (Claude Code, Aider, Cursor, Antigravity CLI):** Excellent at interactive coding inside a single project folder, but strictly single-process with no native mechanism to coordinate across multiple physical machines.
-* **Enterprise Cloud Agent Platforms (Devin Enterprise, OpenHands Cloud):** Platforms that spin up sandboxed cloud virtual machines for GitHub issues. They are heavy, costly, cloud-locked, and cannot easily leverage your own physical hardware, local GPU clusters, or private on-premise networks.
-* **In-Memory Multi-Agent Frameworks (LangGraph, AutoGen, CrewAI):** Frameworks designed to coordinate multiple AI personas. However, they operate primarily on text messages and chat threads inside a single Python process; they lack native primitives for managing distributed Git repositories, live compiler logs, hardware benchmarks, and multi-machine filesystem state.
+* **Ad-Hoc Multi-Machine Dispatch**: Connect 2–5 mixed machines with zero complex cloud infrastructure—currently operates over direct SSH across your local Wi-Fi / Ethernet network (with cloud/mesh network support coming in future phases).
+* **Competitive Strategy Exploration**: Run $N$ parallel implementations of a difficult problem (e.g., SIMD vs. Actor Queues vs. Memory-Mapped files) and benchmark them automatically.
+* **Progress-Aware Early Pruning**: Watchdog automatically halts stuck or regressing agent runs, preventing runaway token costs.
+* **Live Cross-Worker Knowledge Bus**: Insights or bug discoveries found on one node are broadcast to all other running workers in real time.
+* **Multi-Branch Hybrid Synthesis**: Combines the best parts from different workers (e.g., algorithm from Worker 1 + test suite from Worker 2) into one unified Pull Request.
+* **Hardware-Aware Routing**: Directs GPU-intensive or heavy build tasks to machines with matching hardware profiles.
 
 ---
 
-## 4. Industry Gaps & Our Phased Architecture
+## 3. Installation & Setup
 
-HiveMind bridges these gaps through a phased technical roadmap, addressing each major limitation milestone by milestone:
+Follow these steps to clone the repository and set up HiveMind:
 
-```
-                    +------------------------------------------+
-                    |    Master Node (Lead Architect CLI)      |
-                    |   - Strategy Planner & Synthesizer       |
-                    |   - Progress Watchdog & Knowledge Bus    |
-                    +--------------------+---------------------+
-                                         |
-                       [ Tailscale Mesh / Git Remotes ]
-                                         |
-          +------------------------------+------------------------------+
-          |                              |                              |
-          v                              v                              v
-+--------------------+        +--------------------+        +--------------------+
-| Worker 1 (GPU PC)  |        | Worker 2 (Server)  |        | Worker 3 (Laptop)  |
-| Strategy A         |        | Strategy B         |        | Strategy C         |
-| Headless CLI + Test|        | Headless CLI + Test|        | Headless CLI + Test|
-| (Push Branch A)    |        | (Push Branch B)    |        | (Push Branch C)    |
-+--------------------+        +--------------------+        +--------------------+
+### Prerequisites
+* **Python**: 3.10 or higher
+* **Git**: Installed and configured on your system
+* **SSH**: Installed and accessible from your command line
+* **Coding Agents (on worker machines)**: At least one supported coding CLI installed on target machines (`claude-code`, `agy`, or `aider`)
+
+### Clone and Install
+
+```bash
+git clone https://github.com/your-username/HiveMind.git
+cd HiveMind
 ```
 
----
+#### Option A: Fast Setup with `uv` (Recommended)
+```bash
+uv venv
+# Activate virtual environment:
+# Windows (PowerShell): .venv\Scripts\Activate.ps1
+# Linux / macOS:        source .venv/bin/activate
+uv pip install -e .
+```
 
-### Phase 1: The Core Swarm Engine (Targeting Gap 4 — Tooling Void)
-* **The Gap:** Developers must currently choose between single-laptop terminal tools or complex enterprise cloud clusters. There is no simple tool to run an ad-hoc swarm across 2 to 5 personal machines.
-* **What We Are Doing:**
-  * Build a lightweight, frictionless CLI dispatcher that connects machines over **Tailscale** (secure peer-to-peer mesh with no open firewall ports) and **Git** (isolated branches).
-  * Automatically sync code, checkout dedicated experiment branches (`exp/<worker-id>-<strategy>`), trigger headless AI coding sessions (Claude Code / `agy`), and report back test/benchmark outputs to the Master terminal.
+#### Option B: Standard Setup with `pip`
+```bash
+python -m venv .venv
+# Activate virtual environment:
+# Windows (PowerShell): .venv\Scripts\Activate.ps1
+# Linux / macOS:        source .venv/bin/activate
+pip install -e .
+```
 
----
+> **Tip with `uv`:** You can also run commands directly without manual activation using `uv run hive <command>` (e.g. `uv run hive discover`).
 
-### Phase 2: Cost & Hardware Engine (Targeting Gaps 3 & 5 — Token Burn & Blind Allocation)
-* **The Gaps:**
-  * *Uncontrolled Token Burn:* Running multiple agents in parallel burns API credits if an agent gets stuck in an error loop.
-  * *Blind Hardware Allocation:* Existing runners treat every machine as identical, ignoring whether a node has a high-end GPU or 64 CPU cores.
-* **What We Are Doing:**
-  * **Progress-Aware Early Pruning Watchdog:** Monitors live compiler exit codes, test pass trajectories, and turn counts. If a worker stalls or loops on errors, HiveMind automatically terminates it early to save token costs and compute budget.
-  * **Hardware-Aware Capability Routing:** Automatically matches subtasks to machine profiles declared in `cluster.json` (routing CUDA/model-heavy tasks to GPU workstations and heavy test builds to high-core servers).
-
----
-
-### Phase 3: The Intelligence Layer (Targeting Gaps 1 & 2 — Siloed Agents & Winner-Take-All Waste)
-* **The Gaps:**
-  * *Isolated Silos:* Workers cannot share discoveries. If Worker 1 discovers a critical dependency bug or schema quirk, Workers 2 and 3 waste time making the exact same mistake.
-  * *Winner-Take-All Waste:* Existing setups discard losing branches even if Worker 2 wrote a perfect test suite and Worker 3 wrote clean API documentation.
-* **What We Are Doing:**
-  * **Live Knowledge & Discovery Bus:** A real-time event stream that detects critical discoveries in worker logs and broadcasts them directly into the active prompt/scratchpad of all other running agents.
-  * **Multi-Branch Hybrid Code Synthesis (AST Splicing):** When multiple workers produce partial solutions, the Master AI reviews the diffs, extracts non-conflicting components (e.g., algorithm from Worker 1 + test suite from Worker 2), and synthesizes a unified, verified Pull Request.
+After installation, the **`hive`** command will be available in your terminal.
 
 ---
 
-### Phase 4: Production Polish & Secure Sandboxing
-* **What We Are Doing:**
-  * Interactive Terminal User Interface (TUI) showing side-by-side streaming agent thoughts, test counters, and hardware metrics.
-  * Containerized microVM sandboxing (using **gVisor `runsc`** or **E2B**) on worker nodes to safely isolate untrusted AI-generated code execution.
+## 4. How to Run the `hive` CLI
+
+HiveMind operates through the `hive` command line tool:
+
+```bash
+hive --help
+```
+
+### Step 1: Discover Devices on Your Local Network
+Scan your local Wi-Fi or Ethernet subnet to find active machines with open SSH ports and interactively configure your global cluster (`~/.hivemind/cluster.json`):
+
+```bash
+hive discover
+```
+* Probes active IPs, checks SSH port 22, auto-detects remote CPU/RAM/Docker capabilities, and saves selected machines to your global cluster configuration.
+
+### Step 2: Inspect Your Configured Cluster
+View all configured worker nodes, their SSH targets, assigned AI coding engines, and hardware capabilities:
+
+```bash
+hive list
+```
+
+### Step 3: Run Cluster Health & Readiness Checks
+Test SSH reachability, Git installation, and AI agent CLI readiness across all configured machines:
+
+```bash
+hive check
+```
+
+### Step 4: Dispatch a Parallel Swarm Task *(Phase 1 In Progress)*
+Dispatch multi-strategy parallel exploration across your fleet:
+
+```bash
+hive dispatch \
+  --prompt "Optimize the query execution engine in src/engine.rs to achieve >100k req/s" \
+  --strategies 3 \
+  --test-command "cargo test" \
+  --benchmark-command "cargo bench -- --json"
+```
 
 ---
 
-## 5. Installation & Setup
+## 5. SSH Setup & Troubleshooting Guide
 
-> 🚧 *HiveMind is currently in early active development. Setup instructions will be updated as Phase 1 stabilizes.*
-
-### Prerequisites *(Coming Soon)*
-* Python 3.10+
-* Git
-* Tailscale (for secure multi-machine networking)
-* A supported coding CLI on worker machines (`claude-code`, `agy`, or `aider`)
+> ℹ️ **Local Network Focus (Current Phase):** HiveMind currently operates over **direct SSH for local network machines connected on the same Wi-Fi / Ethernet subnet** to trigger isolated Git branching and headless coding agent sessions on your worker nodes. Support for remote/cloud machines across different networks will be expanded in subsequent phases.
 
 ---
 
-## 6. Usage & Configuration
+### Is it necessary to open Port 22?
 
-### Cluster Definition (`cluster.json`) *(Coming Soon)*
+* **On Local Networks (Same Wi-Fi / Ethernet):**  
+  **Yes.** The worker machine must have an SSH server running and listening on Port 22 (or a designated custom port), and the worker's local OS firewall must allow inbound TCP connections on that port.
+* **Across Remote Networks / Internet (Future Phases):**  
+  When using mesh networks (such as NetBird or Tailscale) or SSH tunnels in future phases, public router port-forwarding is not required because the tunnel handles secure peer-to-peer routing.
+
+---
+
+### How to Enable SSH & Open Port 22 on Worker Machines
+
+#### On Ubuntu / Debian Linux:
+```bash
+# 1. Install OpenSSH Server
+sudo apt update && sudo apt install openssh-server -y
+
+# 2. Enable and start the SSH service
+sudo systemctl enable --now ssh
+
+# 3. Allow Port 22 in the firewall (UFW)
+sudo ufw allow 22
+```
+
+#### On Windows (PowerShell as Administrator):
+```powershell
+# 1. Install OpenSSH Server
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+
+# 2. Start the service and set to Automatic startup
+Start-Service sshd
+Set-Service -Name sshd -StartupType 'Automatic'
+
+# 3. Allow inbound Port 22 in Windows Firewall
+New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+```
+
+#### On macOS:
+1. Open **System Settings** $\to$ **General** $\to$ **Sharing**.
+2. Toggle **Remote Login** to **ON**.
+
+---
+
+### Configuring Passwordless SSH Authentication
+
+HiveMind executes tasks automatically and requires **passwordless SSH key authentication** between your Master machine and Worker nodes.
+
+If `hive check` shows `AUTH REQUIRED` or `Permission denied (publickey)`:
+
+#### Step 1: Generate an SSH Key on your Master Machine (if you don't have one):
+```bash
+ssh-keygen -t ed25519
+```
+*(Press Enter on all prompts to accept defaults).*
+
+#### Step 2: Copy your Public Key to the Worker Machine:
+
+* **From Linux / macOS Master:**
+  ```bash
+  ssh-copy-id <worker-username>@<worker-ip>
+  ```
+* **From Windows PowerShell Master:**
+  ```powershell
+  type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh <worker-username>@<worker-ip> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+  ```
+  *(Enter the worker machine's password once to authorize the key).*
+
+#### Step 3: Verify Passwordless Login:
+```bash
+ssh <worker-username>@<worker-ip> "echo OK"
+```
+If this prints `OK` without asking for a password, run `hive check` to confirm that all nodes show `SSH Reachable: YES` and `Git Ready: YES`.
+
+---
+
+### Using `~/.ssh/config` Host Aliases or Cloudflare Tunnels
+
+If you have pre-configured SSH host aliases or Cloudflare Tunnels in your `~/.ssh/config` (for example: `Host homelab`):
+
+You can use the alias name directly as the `host` in `~/.hivemind/cluster.json`:
 
 ```json
 {
-  "cluster_name": "dev-fleet",
+  "cluster_name": "hive-fleet",
   "workers": [
     {
-      "id": "worker-gpu-1",
-      "host": "desktop-gpu.ts.net",
+      "id": "ari",
+      "host": "homelab",
       "user": "developer",
       "workspace_dir": "~/workspace/project",
-      "agent_engine": "claude-code",
-      "capabilities": ["gpu", "cuda12"]
-    },
-    {
-      "id": "worker-cpu-2",
-      "host": "cloud-vps.ts.net",
-      "user": "developer",
-      "workspace_dir": "~/workspace/project",
-      "agent_engine": "claude-code",
-      "capabilities": ["high-cpu", "32-cores"]
+      "agent_engine": "claude-code"
     }
   ]
 }
 ```
 
-### CLI Command *(Under Active Development in Phase 1)*
-
-```bash
-# Package: hivemind | CLI command: hive
-hive check --cluster cluster.json
-
-# Example dispatch syntax
-hive dispatch \
-  --cluster cluster.json \
-  --prompt "Optimize the database cache to achieve >100k req/s" \
-  --strategies 3 \
-  --test-command "cargo test"
-```
+HiveMind will route the connection using your existing SSH config rules, proxy commands, and identity files automatically.
 
 ---
 
-## 7. Project Documentation
+## 6. Project Documentation
 
-* **[Architecture & Detailed Analysis](DISTRIBUTED_AI_CODING_SYSTEM.md)**: Deep dive into distributed agent mechanics, theoretical foundations, and communication schemas.
+* **[Architecture & Deep Analysis](DISTRIBUTED_AI_CODING_SYSTEM.md)**: Deep dive into distributed agent mechanics, problem analysis, market landscape, and technical solutions for all 5 industry gaps.
 * **[Development Roadmap](ROADMAP.md)**: Phased engineering milestones, task checklists, and technical deliverables.
 
 ---
 
-## 8. Contributing & Community
+## 7. Contributing & Community
 
 Contributions, issues, and feature requests are welcome! Feel free to check the [Roadmap](ROADMAP.md) to see what is currently in progress.
+
+---
+
+## 8. License
+
+This project is licensed under the MIT License - see the [LICENSE](license.txt) file for details.

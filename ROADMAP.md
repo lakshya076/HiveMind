@@ -39,7 +39,15 @@ flowchart LR
 - [ ] **Core `hive` CLI Application (`hivemind` package)**:
   - Built with Python (`typer`/`click` + `rich` console output).
   - Commands: `hive check`, `hive dispatch`, `hive status`, `hive merge`.
-- [ ] **Cluster Configuration Engine (`hive check`)**: Parse `cluster.json` and validate machine connectivity over Tailscale/SSH.
+- [ ] **Cluster Configuration Engine (`hive check` & `hive discover`)**:
+  - Parse global `~/.hivemind/cluster.json` and validate machine connectivity over standard SSH.
+  - Automatic hardware probing (`SystemProber`) for CPU cores, RAM, GPU, Docker, and agent CLIs.
+- [ ] **Local Directory Configuration (`hive init`)**:
+  - Support project-level configuration overrides (`./cluster.json` or `.hive/config.json`) alongside the global `~/.hivemind/cluster.json`.
+  - Enable per-repository worker selection, custom workspace folder mappings, and project-specific build/test commands.
+- [ ] **Two-Stage Connectivity & Validation Plan (Phase 1)**:
+  - **Stage 1A (Local Network Testing)**: Test and validate cluster execution across local machines on the same LAN / Wi-Fi (using local IPs `192.168.x.x` or `.local` mDNS hostnames).
+  - **Stage 1B (Cloud & Remote Testing)**: Expand and validate the exact same workflow across remote machines and cloud VPSs across different locations (over open-source mesh networks like NetBird/Headscale or cloud SSH keys).
 - [ ] **Remote Git Branching Harness**: Script remote workers to pull the latest `main`, check out isolated experimental branches (`exp/<worker-id>-<strategy>`), and manage workspace states.
 - [ ] **Headless Agent Invocation**: Implement remote wrappers to trigger headless CLI sessions (`claude -p "..."` / `agy exec "..."` / `aider --message "..."`).
 - [ ] **Result Aggregation**: Collect stdout/stderr, test pass/fail exit codes, and benchmark JSON outputs back to the Master node.
