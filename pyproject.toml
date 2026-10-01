@@ -17,3 +17,4 @@ dependencies = [
 
 [project.scripts]
 hive = "hivemind.cli:cli"
+hivemind = "hivemind.cli:cli"

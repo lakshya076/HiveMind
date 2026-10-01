@@ -82,16 +82,18 @@ pip install -e .
 
 > **Tip with `uv`:** If you prefer running without global install, you can also run directly inside the repo using `uv run hive <command>` (e.g. `uv run hive discover`).
 
-After installation, the **`hive`** command will be available globally in your terminal.
+After installation, both the **`hive`** and **`hivemind`** commands will be available globally in your terminal.
 
 ---
 
-## 4. How to Run the `hive` CLI
+## 4. How to Run the CLI (`hive` / `hivemind`)
 
-HiveMind operates through the `hive` command line tool:
+HiveMind can be run using either the **`hive`** or **`hivemind`** command interchangeably:
 
 ```bash
+# Both commands are identical:
 hive --help
+hivemind --help
 ```
 
 ### Step 1: Discover Devices on Your Local Network
