@@ -66,13 +66,9 @@ git clone https://github.com/your-username/HiveMind.git
 cd HiveMind
 ```
 
-#### Option A: Fast Setup with `uv` (Recommended)
+#### Option A: Fast Global Setup with `uv` (Recommended)
 ```bash
-uv venv
-# Activate virtual environment:
-# Windows (PowerShell): .venv\Scripts\Activate.ps1
-# Linux / macOS:        source .venv/bin/activate
-uv pip install -e .
+uv tool install -e .
 ```
 
 #### Option B: Standard Setup with `pip`
@@ -84,9 +80,9 @@ python -m venv .venv
 pip install -e .
 ```
 
-> **Tip with `uv`:** You can also run commands directly without manual activation using `uv run hive <command>` (e.g. `uv run hive discover`).
+> **Tip with `uv`:** If you prefer running without global install, you can also run directly inside the repo using `uv run hive <command>` (e.g. `uv run hive discover`).
 
-After installation, the **`hive`** command will be available in your terminal.
+After installation, the **`hive`** command will be available globally in your terminal.
 
 ---
 
