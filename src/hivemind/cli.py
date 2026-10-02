@@ -1,7 +1,4 @@
 import click
-import json
-import subprocess
-from pathlib import Path
 from typing import Optional
 from rich.console import Console
 from rich.table import Table
@@ -12,8 +9,90 @@ from rich.prompt import Prompt, Confirm
 from hivemind.discovery.scanner import NetworkScanner, DiscoveredDevice
 from hivemind.discovery.prober import SystemProber
 from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_cluster_path
+from hivemind.runner.dispatch import (
+    DispatchError,
+    assign_strategies,
+    dispatch_run,
+    resolve_repo_url,
+    select_workers,
+)
+from hivemind.runner.state import RunState
+from hivemind.runner.status import (
+    local_base_branch,
+    local_git,
+    local_repo_origin,
+    normalize_git_url,
+    refresh_run,
+)
+from hivemind.ssh import SSHError, ssh_run
 
 console = Console()
+
+
+def _load_config(cluster: Optional[str]) -> Optional[ClusterConfig]:
+    try:
+        return ClusterConfig.load(cluster)
+    except FileNotFoundError:
+        default_path = cluster if cluster else get_default_cluster_path()
+        console.print(
+            f"[bold red]Error:[/bold red] Cluster file '{default_path}' not found. "
+            "Run [bold cyan]hive discover[/bold cyan] first."
+        )
+        return None
+
+
+def _load_run(run_id: Optional[str]) -> Optional[RunState]:
+    try:
+        return RunState.load(run_id) if run_id else RunState.load_latest()
+    except FileNotFoundError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        return None
+
+
+def _status_style(status: str) -> str:
+    mapping = {
+        "succeeded": "[bold green]succeeded[/bold green]",
+        "failed": "[bold red]failed[/bold red]",
+        "running": "[bold yellow]running[/bold yellow]",
+        "starting": "[yellow]starting[/yellow]",
+        "unknown": "[dim]unknown[/dim]",
+    }
+    return mapping.get(status, status)
+
+
+def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
+    table = Table(
+        title=title or f"Run {run.run_id}",
+        border_style="cyan",
+    )
+    table.add_column("Worker", style="bold white")
+    table.add_column("Strategy", style="magenta")
+    table.add_column("Branch", style="green")
+    table.add_column("Status", justify="center")
+    table.add_column("Tests", justify="center")
+    table.add_column("Details", style="dim")
+
+    for worker in run.workers:
+        if worker.test_exit_code is None:
+            tests = "[dim]—[/dim]"
+        elif worker.test_exit_code == 0:
+            tests = "[bold green]pass[/bold green]"
+        else:
+            tests = f"[bold red]fail ({worker.test_exit_code})[/bold red]"
+        details = worker.error or worker.log_tail or ""
+        if len(details) > 120:
+            details = details[-120:]
+        table.add_row(
+            worker.worker_id,
+            worker.strategy,
+            worker.branch or "—",
+            _status_style(worker.status),
+            tests,
+            details.replace("\n", " "),
+        )
+    console.print()
+    console.print(table)
+    console.print()
 
 
 @click.group()
@@ -211,7 +290,11 @@ def list_cmd(cluster: Optional[str]):
             w.workspace_dir
         )
 
-    console.print("\n", table, "\n")
+    console.print("\n", table)
+    if config.repo_url:
+        console.print(f"[dim]Shared origin:[/dim] [white]{config.repo_url}[/white]\n")
+    else:
+        console.print("[dim]Shared origin: not set (pass --repo on hive dispatch or add repo_url to cluster.json)[/dim]\n")
 
 
 @cli.command(name="check")
@@ -245,18 +328,16 @@ def check_cmd(cluster: Optional[str]):
         # If SSH is open, attempt a quick SSH command and probe hardware
         if ssh_ok:
             try:
-                res = subprocess.run(
-                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", "-p", str(w.port), f"{w.user}@{w.host}", "git --version"],
-                    capture_output=True, text=True, timeout=3
-                )
+                res = ssh_run(w, "git --version", timeout=3, check=False)
                 if res.returncode == 0:
                     git_status = "[bold green]YES[/bold green]"
-                    # Probe live tags
                     live_tags = SystemProber.probe_remote(w.host, user=w.user, port=w.port, timeout=3.0)
                     details = f"{res.stdout.strip()} | Profile: {', '.join(live_tags)}"
                 else:
                     git_status = "[bold yellow]AUTH REQUIRED[/bold yellow]"
-                    details = "SSH key not configured on worker"
+                    details = (res.stderr or res.stdout or "SSH key not configured on worker").strip()
+            except SSHError as e:
+                details = str(e)
             except Exception as e:
                 details = str(e)
 
@@ -270,6 +351,181 @@ def check_cmd(cluster: Optional[str]):
         )
 
     console.print(table, "\n")
+
+
+@cli.command(name="dispatch")
+@click.argument("prompt_arg", metavar="PROMPT", required=False)
+@click.option("--prompt", "prompt_opt", default=None, help="Task prompt (alternative to the positional argument).")
+@click.option("--repo", "repo_url", default=None, help="Shared git origin. Overrides cluster.json repo_url.")
+@click.option("--workers", "worker_ids", default=None, help="Comma-separated worker ids (default: all).")
+@click.option("--strategy", "strategies", multiple=True, help="Named strategy for a worker. Repeatable.")
+@click.option("--test", "test_command", default=None, help="Remote command to run after the agent exits.")
+@click.option("--bench", "bench_command", default=None, help="Optional remote benchmark command.")
+@click.option("--model", default=None, help="Model id for aider (default: openrouter/openrouter/free).")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def dispatch_cmd(
+    prompt_arg: Optional[str],
+    prompt_opt: Optional[str],
+    repo_url: Optional[str],
+    worker_ids: Optional[str],
+    strategies: tuple[str, ...],
+    test_command: Optional[str],
+    bench_command: Optional[str],
+    model: Optional[str],
+    cluster: Optional[str],
+):
+    """Start a parallel coding job on worker machines. Returns immediately; use hive status to follow it."""
+    prompt = (prompt_arg or prompt_opt or "").strip()
+    if not prompt:
+        console.print("[bold red]Error:[/bold red] A prompt is required. Example: hive dispatch \"Fix add() so check.py passes.\"")
+        return
+
+    config = _load_config(cluster)
+    if config is None:
+        return
+
+    try:
+        resolved_repo = resolve_repo_url(config, repo_url)
+        selected = select_workers(
+            config,
+            [part.strip() for part in worker_ids.split(",")] if worker_ids else None,
+        )
+        assigned = assign_strategies(selected, strategies)
+        extra = len(strategies) - len(selected)
+        if extra > 0:
+            console.print(f"[yellow]Ignoring {extra} extra --strategy value(s); one strategy is used per worker.[/yellow]")
+        run = dispatch_run(
+            config,
+            prompt,
+            repo_url=resolved_repo,
+            workers=selected,
+            strategies=assigned,
+            test_command=test_command,
+            bench_command=bench_command,
+            model=model,
+        )
+    except DispatchError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        return
+
+    console.print(Panel.fit(
+        f"[bold green]Dispatched run[/bold green] [white]{run.run_id}[/white]\n"
+        f"[dim]Origin:[/dim] {run.repo_url}\n"
+        f"[dim]Follow progress with[/dim] [bold white]hive status[/bold white]",
+        border_style="green",
+    ))
+    _print_run_table(run)
+
+
+@cli.command(name="status")
+@click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def status_cmd(run_id: Optional[str], cluster: Optional[str]):
+    """Show live status of a dispatched run by reading result.json on each worker."""
+    run = _load_run(run_id)
+    if run is None:
+        return
+
+    config = None
+    try:
+        config = ClusterConfig.load(cluster)
+    except FileNotFoundError:
+        pass
+
+    workers_by_id = {w.id: w for w in config.workers} if config else {}
+    run = refresh_run(run, workers_by_id)
+    console.print(
+        f"[bold cyan]Run[/bold cyan] [white]{run.run_id}[/white]  "
+        f"[dim]origin {run.repo_url}[/dim]"
+    )
+    _print_run_table(run)
+    still_running = any(w.status in {"starting", "running", "unknown"} for w in run.workers)
+    if still_running:
+        console.print("[dim]Jobs are still in progress. Re-run hive status to refresh.[/dim]\n")
+    else:
+        console.print("[dim]All workers finished. Review branches, then hive merge.[/dim]\n")
+
+
+@cli.command(name="merge")
+@click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
+    """Fetch a winning exp/* branch from origin and merge it into local main."""
+    run = _load_run(run_id)
+    if run is None:
+        return
+
+    config = None
+    try:
+        config = ClusterConfig.load(cluster)
+    except FileNotFoundError:
+        pass
+    workers_by_id = {w.id: w for w in config.workers} if config else {}
+    run = refresh_run(run, workers_by_id)
+    _print_run_table(run, title=f"Pick a winner for {run.run_id}")
+
+    finished = [w for w in run.workers if w.branch]
+    if not finished:
+        console.print("[bold red]Error:[/bold red] No worker branches are available to merge yet.")
+        return
+
+    default_id = next((w.worker_id for w in finished if w.status == "succeeded"), finished[0].worker_id)
+    choice = Prompt.ask("Worker id to merge", default=default_id)
+    winner = next((w for w in finished if w.worker_id == choice), None)
+    if winner is None:
+        console.print(f"[bold red]Error:[/bold red] Unknown worker '{choice}'.")
+        return
+
+    origin = local_repo_origin()
+    if origin is None:
+        console.print(
+            "[bold red]Error:[/bold red] Run hive merge from a clone of the shared origin.\n"
+            f"[dim]Expected repo:[/dim] {run.repo_url}"
+        )
+        return
+    if normalize_git_url(origin) != normalize_git_url(run.repo_url):
+        console.print(
+            "[bold red]Error:[/bold red] This directory's origin does not match the run.\n"
+            f"  local: {origin}\n"
+            f"  run:   {run.repo_url}"
+        )
+        return
+
+    try:
+        local_git(
+            "fetch",
+            "origin",
+            f"+refs/heads/{winner.branch}:refs/remotes/origin/{winner.branch}",
+        )
+        base = local_base_branch()
+        log = local_git("log", "--oneline", f"origin/{base}..origin/{winner.branch}", check=False)
+        diff = local_git("diff", "--stat", f"origin/{base}...origin/{winner.branch}", check=False)
+    except RuntimeError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        return
+
+    console.print(Panel(
+        (log.stdout or "[dim]no commits on branch[/dim]") + "\n" + (diff.stdout or ""),
+        title=f"origin/{winner.branch} vs origin/{base}",
+        border_style="blue",
+    ))
+
+    if not Confirm.ask(f"Merge [bold]{winner.branch}[/bold] into local [bold]{base}[/bold]?", default=True):
+        console.print("[dim]Merge cancelled.[/dim]")
+        return
+
+    try:
+        local_git("checkout", base)
+        local_git("merge", "--no-ff", f"origin/{winner.branch}", "-m", f"hive: merge {winner.branch} from {run.run_id}")
+    except RuntimeError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        return
+
+    console.print(Panel.fit(
+        f"[bold green]Merged[/bold green] [white]{winner.branch}[/white] into local [white]{base}[/white].\n"
+        "[dim]Push to origin when you are ready.[/dim]",
+        border_style="green",
+    ))
 
 
 if __name__ == "__main__":

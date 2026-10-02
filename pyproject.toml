@@ -18,3 +18,12 @@ dependencies = [
 [project.scripts]
 hive = "hivemind.cli:cli"
 hivemind = "hivemind.cli:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"hivemind.runner" = ["worker.sh"]

@@ -4,9 +4,14 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+def get_hivemind_home() -> Path:
+    """Returns the HiveMind home directory (~/.hivemind)."""
+    return Path.home() / ".hivemind"
+
+
 def get_default_cluster_path() -> Path:
     """Returns the default global cluster configuration path (~/.hivemind/cluster.json)."""
-    return Path.home() / ".hivemind" / "cluster.json"
+    return get_hivemind_home() / "cluster.json"
 
 
 class WorkerNode(BaseModel):
@@ -23,6 +28,7 @@ class WorkerNode(BaseModel):
 class ClusterConfig(BaseModel):
     """Cluster definition containing a fleet of worker nodes."""
     cluster_name: str = Field(default="hive-fleet", description="Name of the cluster")
+    repo_url: Optional[str] = Field(default=None, description="Shared git origin workers clone and push to")
     workers: List[WorkerNode] = Field(default_factory=list, description="List of configured worker nodes")
 
     @classmethod
