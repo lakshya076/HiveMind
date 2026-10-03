@@ -163,6 +163,10 @@ fi
 if ! grep -qF '.aider' .gitignore 2>/dev/null; then
     printf '.aider*\n' >> .gitignore
 fi
+# agy workspace files
+if ! grep -qxF '.agy/' .gitignore 2>/dev/null; then
+    printf '.agy/\n' >> .gitignore
+fi
 if ! grep -qxF '__pycache__/' .gitignore 2>/dev/null; then
     printf '__pycache__/\n*.pyc\n*.pyo\n' >> .gitignore
 fi

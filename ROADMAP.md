@@ -65,7 +65,7 @@ flowchart LR
   - Support project-level configuration overrides (`./cluster.json` or `.hive/config.json`) alongside the global `~/.hivemind/cluster.json`.
   - Enable per-repository worker selection, custom workspace folder mappings, and project-specific build/test commands.
 - [x] **Remote Git Branching Harness**: Script remote workers to pull the latest `main`, check out isolated experimental branches (`exp/<worker-id>-<strategy>`), and manage workspace states.
-- [x] **Headless Agent Invocation**: Implement remote wrappers to trigger headless CLI sessions (`claude -p "..."` / `agy exec "..."` / `aider --message "..."`).
+- [x] **Headless Agent Invocation**: Implement remote wrappers to trigger headless CLI sessions (`claude -p "..."` / `agy -p "..."` / `aider --message "..."`).
 - [x] **Result Aggregation**: Collect stdout/stderr, test pass/fail exit codes, and benchmark JSON outputs back to the Master node.
 - [x] **Interactive Merge Assistant (**`hive merge`**)**: Master CLI displays a clean summary table and prompts the user to inspect diffs and merge the winning branch into `main`.
 

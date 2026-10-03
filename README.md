@@ -192,19 +192,21 @@ Workers clone this repo, push `exp/<worker>-<strategy>` branches to it, and `hiv
 
 The coding CLI (`aider`, `claude`, or `agy`) must be installed on each **worker**. `hive` itself stays on the master only — workers do not install HiveMind.
 
-> **Aider + OpenRouter (CURRENT TEST SETUP):**
+> **Agent engine options:**
 >
-> The default aider model is `openrouter/openrouter/free`. Workers need `OPENROUTER_API_KEY` in their environment.
-> Export it **unconditionally** in `~/.bashrc` — place the line **before** any interactive-shell guard (`case $-`) that would skip it in non-login SSH sessions:
+> | Engine | `agent_engine` value | Default model | Auth needed on worker |
+> |--------|---------------------|---------------|-----------------------|
+> | Aider | `"aider"` | `openrouter/openrouter/free` | `OPENROUTER_API_KEY` |
+> | Antigravity (`agy`) | `"agy"` | `gemini-3.7-flash-medium` | `GOOGLE_API_KEY` or `ANTHROPIC_API_KEY` (depending on model) |
+> | Claude Code | `"claude-code"` | system default | `ANTHROPIC_API_KEY` |
 >
-> ```bash
-> # ~/.bashrc, before any 'case $-' guard:
-> export OPENROUTER_API_KEY="sk-or-v1-..."
+> **Aider + OpenRouter:** Export `OPENROUTER_API_KEY` **unconditionally** in `~/.bashrc` — place it
+> **before** any `case $-` interactive-shell guard, or in `~/.env` (the worker wrapper loads both).
+> If the key is missing, aider opens a browser OAuth flow and hangs indefinitely.
 >
-> # Or place it in ~/.env — the hive worker wrapper loads this file automatically
-> ```
->
-> If the key isn't found, aider tries to open a browser OAuth flow and hangs indefinitely.
+> **agy:** Runs as `agy -p "<prompt>" --model <model>` in non-interactive mode.
+> Ensure the API key for your chosen model is exported on the worker.
+> Override the default model per-run with `hive dispatch --model <id>` (e.g. `--model claude-sonnet-4-6`).
 
 ### Step 5: Dispatch a Parallel Swarm Task
 
@@ -333,10 +335,12 @@ worker.sh
 ├─ Write .gitignore entries
 │     adds .hive/ and .aider* so hive run files are never committed
 │
-├─ Run the coding agent
-│     e.g.: aider --model openrouter/openrouter/free \
-│                  --message "$(cat prompt.txt)" \
-│                  --yes-always --no-auto-commits --no-dirty-commits
+├─ Run the coding agent  (command built from agent_engine in cluster.json)
+│     aider:  aider --model openrouter/openrouter/free \
+│                    --message "$(cat prompt.txt)" \
+│                    --yes-always --no-auto-commits --no-dirty-commits
+│     agy:    agy -p "$(cat prompt.txt)" --model gemini-3.7-flash-medium
+│     claude: claude -p "$(cat prompt.txt)"
 │     stdout → agent.log
 │     agent edits files only. It does NOT commit or push.
 │
