@@ -1,7 +1,7 @@
 from typing import Optional
 
 DEFAULT_AIDER_MODEL = "openrouter/openrouter/free"
-
+DEFAULT_AGY_MODEL = "gemini-3.7-flash-medium"
 
 class UnsupportedEngineError(ValueError):
     pass
@@ -19,9 +19,10 @@ def build_agent_command(engine: str, model: Optional[str] = None) -> str:
     if engine_key in ("claude-code", "claude"):
         return 'claude -p "$(cat "$PROMPT_FILE")"'
     if engine_key == "agy":
-        return 'agy exec "$(cat "$PROMPT_FILE")"'
+        chosen = model or DEFAULT_AGY_MODEL
+        return ('agy -p "$(cat "$PROMPT_FILE")" --model {model}').format(model=_posix_single_quote(chosen))
     raise UnsupportedEngineError(
-        f"Unsupported agent engine '{engine}'. Use claude-code, agy, or aider."
+        f"Unsupported agent engine '{engine}'. Use claude-code, agy, or aider. Custom AI Engines not support for now."
     )
 
 
