@@ -1,3 +1,4 @@
+import os
 import json
 from pathlib import Path
 from typing import List, Optional
@@ -14,13 +15,26 @@ def get_default_cluster_path() -> Path:
     return get_hivemind_home() / "cluster.json"
 
 
+def get_fleet_key() -> Optional[str]:
+    """Retrieve the fleet API key from ~/.hivemind/fleet.key or environment."""
+    key_file = get_hivemind_home() / "fleet.key"
+    if key_file.exists():
+        try:
+            val = key_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except Exception:
+            pass
+    return os.environ.get("HIVEMIND_FLEET_KEY")
+
+
 class WorkerNode(BaseModel):
     """Configuration for an individual worker machine in the cluster."""
     id: str = Field(..., description="Unique human-readable identifier for the worker")
-    host: str = Field(..., description="IP address or hostname of the machine")
-    port: int = Field(default=22, description="SSH port")
-    user: str = Field(default="developer", description="SSH username")
-    workspace_dir: str = Field(default="~/workspace/project", description="Target workspace directory on worker")
+    host: str = Field(..., description="IP address or hostname of the machine (Tailscale / LAN)")
+    port: int = Field(default=7422, description="Worker HTTP daemon port (default: 7422)")
+    user: Optional[str] = Field(default=None, description="Optional worker username")
+    workspace_dir: str = Field(default="~/hive-workspace", description="Target workspace directory on worker")
     agent_engine: str = Field(default="claude-code", description="AI Coding CLI engine (e.g. claude-code, agy, aider)")
     capabilities: List[str] = Field(default_factory=list, description="Hardware/software tags (e.g. gpu, 32-cores)")
 

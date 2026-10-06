@@ -10,7 +10,7 @@ from rich.prompt import Prompt, Confirm
 from hivemind.discovery.scanner import NetworkScanner, DiscoveredDevice
 from hivemind.discovery.prober import SystemProber
 from hivemind.discovery.tailscale import TailscaleScanner
-from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_cluster_path, get_hivemind_home
+from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_cluster_path, get_hivemind_home, get_fleet_key
 from hivemind.runner.dispatch import (
     DispatchError,
     assign_strategies,
@@ -26,7 +26,6 @@ from hivemind.runner.status import (
     normalize_git_url,
     refresh_run,
 )
-from hivemind.ssh import SSHError, ssh_run
 
 console = Console()
 
@@ -76,7 +75,7 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
 
     for worker in run.workers:
         if worker.test_exit_code is None:
-            tests = "[dim]—[/dim]"
+            tests = "[dim]-[/dim]"
         elif worker.test_exit_code == 0:
             tests = "[bold green]pass[/bold green]"
         else:
@@ -84,10 +83,13 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
         details = worker.error or worker.log_tail or ""
         if len(details) > 120:
             details = details[-120:]
+        # Strip non-ASCII characters (e.g. aider token count symbols) to avoid
+        # UnicodeEncodeError on Windows cp1252 consoles
+        details = details.encode("ascii", errors="ignore").decode("ascii")
         table.add_row(
             worker.worker_id,
             worker.strategy,
-            worker.branch or "—",
+            worker.branch or "-",
             _status_style(worker.status),
             tests,
             details.replace("\n", " "),
@@ -126,7 +128,7 @@ def keygen_cmd(force: bool):
     key_file.write_text(new_key, encoding="utf-8")
 
     console.print(Panel.fit(
-        f"[bold green]✓ New Fleet API Key Generated Successfully![/bold green]\n\n"
+        f"[bold green][OK] New Fleet API Key Generated Successfully![/bold green]\n\n"
         f"[bold white]Key:[/bold white] [bold cyan]{new_key}[/bold cyan]\n\n"
         f"[dim]Saved to:[/dim] [white]{key_file}[/white]\n\n"
         f"[bold yellow]Next Step on Worker Nodes:[/bold yellow]\n"
@@ -135,8 +137,6 @@ def keygen_cmd(force: bool):
         title="HiveMind Fleet Key",
         border_style="green"
     ))
-
-
 
 
 @cli.command(name="discover")
@@ -154,7 +154,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
     if not mode:
         if ts_available:
             console.print(Panel.fit(
-                "[bold cyan]HiveMind Discovery[/bold cyan]\n"
+                "[bold cyan]HiveMind Fleet Discovery[/bold cyan]\n"
                 "[dim]Tailscale mesh network and local network detected.[/dim]",
                 border_style="cyan"
             ))
@@ -178,7 +178,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
     # 1. Tailscale Discovery
     if mode in ("tailscale", "both"):
         with console.status("[bold green]Querying Tailscale daemon for active peers...[/bold green]"):
-            ts_peers = TailscaleScanner.discover_peers(probe_ssh=True)
+            ts_peers = TailscaleScanner.discover_peers(probe_ssh=False)
             discovered.extend(ts_peers)
         source_label = "Tailscale Mesh" if mode == "tailscale" else "Tailscale + Local"
 
@@ -230,22 +230,51 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
         console.print("[yellow]No active devices discovered.[/yellow]")
         return
 
+    # Probe daemons on all discovered devices in parallel / fast
+    device_health_map = {}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Probing HiveMind worker daemons (port 7422)...", total=len(discovered))
+        for dev in discovered:
+            if not dev.is_local_host:
+                h_data, tags, err = SystemProber.probe_daemon(dev.ip, port=7422, timeout=1.8)
+                device_health_map[dev.ip] = (h_data, tags, err)
+            progress.advance(task)
+
     # Display results table
     table = Table(title=f"Discovered Devices ({source_label})", border_style="blue")
     table.add_column("#", justify="right", style="cyan", no_wrap=True)
     table.add_column("IP Address", style="bold white")
     table.add_column("Hostname", style="green")
-    table.add_column("SSH (Port 22)", justify="center")
+    table.add_column("Worker Daemon (Port 7422)", justify="center")
+    table.add_column("OS / AI Engines", style="cyan")
     table.add_column("Type", style="dim")
 
     for idx, dev in enumerate(discovered, 1):
-        ssh_status = "[bold green]OPEN[/bold green]" if dev.ssh_open else "[dim red]CLOSED[/dim red]"
-        device_type = "Master Host" if dev.is_local_host else ("Tailscale Peer" if dev.ip.startswith("100.") else "Remote Device")
+        if dev.is_local_host:
+            daemon_status = "[dim]-- (Master Host)[/dim]"
+            profile_str = "Master Node"
+            device_type = "Master Host"
+        else:
+            h_data, tags, err = device_health_map.get(dev.ip, (None, [], None))
+            if h_data:
+                daemon_status = f"[bold green]READY ({h_data.get('status', 'idle')})[/bold green]"
+                engines = ", ".join(h_data.get("engines", [])) or "no engines detected"
+                profile_str = f"{h_data.get('os', 'os')} - {engines}"
+            else:
+                daemon_status = "[dim red]NOT INSTALLED / OFFLINE[/dim red]"
+                profile_str = f"[dim]{dev.os_type or 'unknown'}[/dim]"
+            device_type = "Tailscale Peer" if dev.ip.startswith("100.") else "Local Machine"
+
         table.add_row(
             str(idx),
             dev.ip,
             dev.hostname,
-            ssh_status,
+            daemon_status,
+            profile_str,
             device_type
         )
 
@@ -263,9 +292,9 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
 
     selected_devices: list[DiscoveredDevice] = []
     if selection_str.strip().lower() == "all":
-        # Default to selecting remote devices with open SSH ports
-        ssh_ready = [d for d in discovered if not d.is_local_host and d.ssh_open]
-        selected_devices = ssh_ready if ssh_ready else [d for d in discovered if not d.is_local_host]
+        # Default to selecting remote devices with active worker daemons
+        ready = [d for d in discovered if not d.is_local_host and device_health_map.get(d.ip, (None, [], None))[0] is not None]
+        selected_devices = ready if ready else [d for d in discovered if not d.is_local_host]
     else:
         for part in selection_str.split(","):
             part = part.strip()
@@ -287,45 +316,31 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
         console.print(f"[bold cyan]--- Device #{i} ({dev.hostname} @ {dev.ip}) ---[/bold cyan]")
         
         worker_id = Prompt.ask("  Worker ID", default=default_id)
-        ssh_user = Prompt.ask("  SSH Username [dim](actual user on target device)[/dim]", default="lakshya" if dev.hostname.lower() == "ari" else "developer")
-        ssh_port = int(Prompt.ask("  SSH Port", default="22"))
+        worker_port = int(Prompt.ask("  Daemon Port", default="7422"))
 
-        # Skip probing if SSH port 22 is closed
-        detected_tags: list[str] = []
-        if not dev.ssh_open and ssh_port == 22:
-            console.print("  [yellow]⚠ SSH port 22 is closed on this device. Skipping hardware probe.[/yellow]")
+        h_data, detected_tags, probe_err = device_health_map.get(dev.ip, (None, [], None))
+        if not h_data:
+            # Try on-the-spot probe if port was customized
+            h_data, detected_tags, probe_err = SystemProber.probe_daemon(dev.ip, port=worker_port)
+
+        if h_data:
+            default_caps_str = ", ".join(detected_tags)
+            console.print(f"  [bold green][OK] Worker Daemon Active:[/bold green] [cyan]{default_caps_str}[/cyan]")
         else:
-            console.print("  [dim]Probing hardware & installed tools over SSH...[/dim]")
-            detected_tags, probe_err = SystemProber.probe_remote_detailed(dev.ip, user=ssh_user, port=ssh_port, timeout=3.5)
-            if detected_tags:
-                default_caps_str = ", ".join(detected_tags)
-                console.print(f"  [bold green]✓ Detected Profile:[/bold green] [cyan]{default_caps_str}[/cyan]")
-            else:
-                err_text = probe_err if probe_err else "Host unreachable or command failed"
-                console.print(f"  [bold red]✗ Probe Failed:[/bold red] [yellow]{err_text}[/yellow]")
-                if "Authentication" in err_text:
-                    console.print(f"  [dim yellow]Tip: Authorize your Master SSH public key (~/.ssh/id_ed25519.pub) on {dev.hostname} for user '{ssh_user}'.[/dim yellow]")
+            default_caps_str = ""
+            console.print(f"  [yellow][!] Daemon Probe Warning:[/yellow] [dim]{probe_err or 'No response on port ' + str(worker_port)}[/dim]")
 
-        default_caps_str = ", ".join(detected_tags)
-        
         # Suggest workspace directory based on OS
         is_windows_peer = dev.os_type == "windows" or "os-windows" in detected_tags
         if is_windows_peer:
-            default_ws = f"C:\\Users\\{ssh_user}\\workspace\\project"
-        elif dev.hostname.lower() == "ari":
-            default_ws = "~/hive-testing"
+            default_ws = "C:\\hive-workspace"
         else:
-            default_ws = "~/workspace/project"
+            default_ws = "~/hive-workspace"
 
         workspace_dir = Prompt.ask("  Workspace Directory", default=default_ws)
         
         # Auto-suggest default engine if detected
-        default_engine = "claude-code"
-        if "engine:agy" in detected_tags:
-            default_engine = "agy"
-        elif "engine:aider" in detected_tags:
-            default_engine = "aider"
-
+        default_engine = "aider" if "engine:aider" in detected_tags else ("agy" if "engine:agy" in detected_tags else "claude-code")
         agent_engine = Prompt.ask(
             "  AI Coding CLI Engine",
             choices=["claude-code", "agy", "aider", "custom"],
@@ -341,8 +356,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
         workers.append(WorkerNode(
             id=worker_id,
             host=dev.ip,
-            port=ssh_port,
-            user=ssh_user,
+            port=worker_port,
             workspace_dir=workspace_dir,
             agent_engine=agent_engine,
             capabilities=caps
@@ -356,8 +370,8 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
 
     saved_path = cluster_config.save(output)
     console.print(Panel.fit(
-        f"[bold green]✓ Global cluster configuration saved successfully to [white]{saved_path}[/white][/bold green]\n"
-        f"[dim]Run [bold white]hive check[/bold white] to verify connectivity and agent readiness.[/dim]",
+        f"[bold green][OK] Global cluster configuration saved successfully to [white]{saved_path}[/white][/bold green]\n"
+        f"[dim]Run [bold white]hive check[/bold white] to verify daemon readiness across the fleet.[/dim]",
         border_style="green"
     ))
 
@@ -375,8 +389,8 @@ def list_cmd(cluster: Optional[str]):
 
     table = Table(title=f"HiveMind Cluster: {config.cluster_name} ({len(config.workers)} Workers)", border_style="cyan")
     table.add_column("Worker ID", style="bold white")
-    table.add_column("Host:Port", style="green")
-    table.add_column("User", style="yellow")
+    table.add_column("Daemon Address", style="green")
+    table.add_column("Workspace Root", style="yellow")
     table.add_column("Engine", style="magenta")
     table.add_column("Capabilities", style="blue")
 
@@ -385,7 +399,7 @@ def list_cmd(cluster: Optional[str]):
         table.add_row(
             worker.id,
             f"{worker.host}:{worker.port}",
-            worker.user,
+            worker.workspace_dir,
             worker.agent_engine,
             caps_str
         )
@@ -402,7 +416,7 @@ def list_cmd(cluster: Optional[str]):
 @cli.command(name="check")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file (default: ~/.hivemind/cluster.json).")
 def check_cmd(cluster: Optional[str]):
-    """Test SSH connectivity, Git readiness, and AI CLI tools on all configured workers."""
+    """Test HTTP Daemon connectivity, Git readiness, and AI CLI tools on all configured workers."""
     config = _load_config(cluster)
     if config is None:
         return
@@ -414,7 +428,7 @@ def check_cmd(cluster: Optional[str]):
 
     table = Table(title="Cluster Readiness Status", border_style="green")
     table.add_column("Worker ID", style="bold white")
-    table.add_column("SSH Reachable", justify="center")
+    table.add_column("Daemon Reachable", justify="center")
     table.add_column("Git Ready", justify="center")
     table.add_column("Agent Engine", justify="center")
     table.add_column("Live Hardware / Tools", style="cyan")
@@ -427,41 +441,32 @@ def check_cmd(cluster: Optional[str]):
         task = progress.add_task("Auditing worker nodes...", total=len(config.workers))
 
         for worker in config.workers:
-            progress.update(task, description=f"Auditing [bold cyan]{worker.id}[/bold cyan] ({worker.host})...")
+            progress.update(task, description=f"Auditing [bold cyan]{worker.id}[/bold cyan] ({worker.host}:{worker.port})...")
             
-            # 1. SSH Ping
-            ssh_status = "[bold green]YES[/bold green]"
-            git_status = "[bold green]YES[/bold green]"
-            engine_status = f"[bold green]{worker.agent_engine}[/bold green]"
+            h_data, tags, err = SystemProber.probe_daemon(worker.host, port=worker.port, timeout=3.5)
 
-            try:
-                out = ssh_run(worker, "git --version", timeout=4)
-                if not out or "git version" not in out:
-                    git_status = "[bold yellow]NO (git missing)[/bold yellow]"
-            except SSHError as exc:
-                ssh_status = f"[bold red]FAIL ({exc})[/bold red]"
-                git_status = "[dim red]UNKNOWN[/dim red]"
-                engine_status = "[dim red]UNKNOWN[/dim red]"
-
-            # Check Agent Tooling
-            if "FAIL" not in ssh_status:
-                try:
-                    engine_cmd = f"command -v {worker.agent_engine} || which {worker.agent_engine}"
-                    if worker.agent_engine == "claude-code":
-                        engine_cmd = "command -v claude || which claude"
-                    agent_path = ssh_run(worker, engine_cmd, timeout=4).strip()
-                    if not agent_path:
-                        engine_status = f"[bold red]MISSING ({worker.agent_engine})[/bold red]"
-                except SSHError:
+            if h_data:
+                daemon_status = "[bold green]ONLINE (Ready)[/bold green]" if h_data.get("status") == "ready" else "[bold yellow]BUSY[/bold yellow]"
+                git_status = "[bold green]YES[/bold green]" if h_data.get("git_ready") else "[bold red]NO (missing)[/bold red]"
+                
+                engines = h_data.get("engines", [])
+                if worker.agent_engine in engines:
+                    engine_status = f"[bold green]{worker.agent_engine}[/bold green]"
+                elif engines:
+                    engine_status = f"[yellow]{worker.agent_engine} (avail: {', '.join(engines)})[/yellow]"
+                else:
                     engine_status = f"[bold red]MISSING ({worker.agent_engine})[/bold red]"
 
-            # Real-time hardware & tool probe
-            live_tags = SystemProber.probe_remote(worker.host, user=worker.user, port=worker.port, timeout=4)
-            live_caps_str = ", ".join(live_tags) if live_tags else "[dim]unreachable[/dim]"
+                live_caps_str = ", ".join(tags) if tags else "[dim]none[/dim]"
+            else:
+                daemon_status = f"[bold red]OFFLINE ({err or 'refused'})[/bold red]"
+                git_status = "[dim red]UNKNOWN[/dim red]"
+                engine_status = "[dim red]UNKNOWN[/dim red]"
+                live_caps_str = "[dim red]unreachable[/dim red]"
 
             table.add_row(
                 worker.id,
-                ssh_status,
+                daemon_status,
                 git_status,
                 engine_status,
                 live_caps_str
@@ -469,6 +474,7 @@ def check_cmd(cluster: Optional[str]):
             progress.advance(task)
 
     console.print("\n", table, "\n")
+
 
 
 @cli.command(name="dispatch")
@@ -517,7 +523,7 @@ def dispatch_cmd(
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Starting remote jobs over SSH...", total=len(selected))
+        task = progress.add_task("Dispatching tasks to worker daemons...", total=len(selected))
         try:
             run = dispatch_run(
                 config,

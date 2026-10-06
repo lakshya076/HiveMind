@@ -4,36 +4,24 @@ from typing import Optional
 from hivemind.config.cluster import WorkerNode
 from hivemind.runner.remote import read_worker_result
 from hivemind.runner.state import RunState
-from hivemind.ssh import SSHError
 
 
 def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState:
-    """Poll each worker for result.json and update local run state."""
+    """Poll each worker for live task status and update local run state."""
     for worker_state in run.workers:
-        if worker_state.status in {"succeeded", "failed"} and worker_state.remote_run_dir:
-            # Still poll so a previously "running" machine that finished is updated;
-            # already-terminal rows can be refreshed too in case of late writes.
-            pass
         worker = workers_by_id.get(worker_state.worker_id)
         if worker is None:
             worker = WorkerNode(
                 id=worker_state.worker_id,
                 host=worker_state.host,
-                port=worker_state.port,
+                port=worker_state.port or 7422,
                 user=worker_state.user,
                 workspace_dir=worker_state.workspace_dir,
                 agent_engine=worker_state.agent_engine,
             )
-        if not worker_state.remote_run_dir:
-            continue
-        try:
-            status, payload, log_tail = read_worker_result(worker, worker_state.remote_run_dir)
-        except SSHError as exc:
-            worker_state.log_tail = str(exc)
-            if worker_state.status not in {"succeeded", "failed"}:
-                worker_state.status = "unknown"
-                worker_state.error = str(exc)
-            continue
+        
+        run_identifier = worker_state.remote_run_dir or run.run_id
+        status, payload, log_tail = read_worker_result(worker, run_identifier)
 
         worker_state.log_tail = log_tail or worker_state.log_tail
         if payload:
@@ -45,6 +33,8 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
             worker_state.benchmark_path = payload.get("benchmark_path")
         elif worker_state.status not in {"succeeded", "failed"}:
             worker_state.status = status
+            if status == "unknown" and log_tail:
+                worker_state.error = log_tail
 
     run.save()
     return run

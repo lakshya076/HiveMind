@@ -1,7 +1,7 @@
 # HiveMind: Distributed AI Coding Agent Fleet
 
-[![Status](https://img.shields.io/badge/Status-Early_Development-orange.svg)](#)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-Active_Development-orange.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](license.txt)
 [![Target-Engines](https://img.shields.io/badge/Engines-Claude_Code_|_Antigravity_|_Aider-purple.svg)](#)
 
 > **Transform multiple machines into a coordinated, parallel AI software engineering team.**  
@@ -13,18 +13,24 @@
 
 * [1. Overview](#1-overview)
 * [2. Key Features](#2-key-features)
-* [3. Installation & Setup](#3-installation--setup)
-* [4. How to Run the `hive` CLI](#4-how-to-run-the-hive-cli)
-  * [Workflow Overview](#-workflow-overview)
-* [5. What Happens on a Worker Machine](#5-what-happens-on-a-worker-machine)
-* [5B. Running `hivemind-worker` as a Persistent Background Service](#5b-running-hivemind-worker-as-a-persistent-background-service-auto-start-on-boot)
-* [6. SSH Setup & Troubleshooting Guide](#6-ssh-setup--troubleshooting-guide)
-  * [Is it necessary to open Port 22?](#is-it-necessary-to-open-port-22)
-  * [How to Enable SSH & Open Port 22 on Worker Machines](#how-to-enable-ssh--open-port-22-on-worker-machines)
-  * [Configuring Passwordless SSH Authentication](#configuring-passwordless-ssh-authentication)
-  * [Using `~/.ssh/config` Host Aliases or Cloudflare Tunnels](#using-sshconfig-host-aliases-or-cloudflare-tunnels)
-* [7. Project Documentation](#7-project-documentation)
-* [8. Contributing & Community](#8-contributing--community)
+* [3. Architecture & Workflow](#3-architecture--workflow)
+* [4. Installation & Setup](#4-installation--setup)
+  * [Master Machine Setup (`hive`)](#master-machine-setup-hive)
+  * [Worker Machine Setup (`hivemind-worker`)](#worker-machine-setup-hivemind-worker)
+* [5. CLI Command Reference](#5-cli-command-reference)
+  * [Step 1: Generate Fleet API Key (`hive keygen`)](#step-1-generate-fleet-api-key-hive-keygen)
+  * [Step 2: Discover Devices (`hive discover`)](#step-2-discover-devices-hive-discover)
+  * [Step 3: Inspect Cluster (`hive list`)](#step-3-inspect-cluster-hive-list)
+  * [Step 4: Audit Cluster Readiness (`hive check`)](#step-4-audit-cluster-readiness-hive-check)
+  * [Step 5: Dispatch a Parallel Swarm Job (`hive dispatch`)](#step-5-dispatch-a-parallel-swarm-job-hive-dispatch)
+  * [Step 6: Track Live Execution (`hive status`)](#step-6-track-live-execution-hive-status)
+  * [Step 7: Inspect & Merge Winner (`hive merge`)](#step-7-inspect--merge-winner-hive-merge)
+* [6. Running `hivemind-worker` as a Persistent Service](#6-running-hivemind-worker-as-a-persistent-service)
+  * [🐧 Linux (systemd Service)](#-linux-systemd-service)
+  * [🪟 Windows (Background / Task Scheduler / NSSM)](#-windows-background--task-scheduler--nssm)
+* [7. Security Model](#7-security-model)
+* [8. Project Documentation](#8-project-documentation)
+  * [Network & Machine Setup Guide](NETWORK_SETUP.md)
 * [9. License](#9-license)
 
 ---
@@ -33,402 +39,245 @@
 
 **HiveMind** (CLI: `hive`, Package: `hivemind`) is an open-source distributed orchestrator for autonomous AI coding agents.
 
-Instead of relying on a single AI agent working sequentially on one computer, HiveMind coordinates your existing fleet of machines (GPU workstations, cloud instances, and laptops) into an autonomous development team:
+Instead of relying on a single AI agent working sequentially on one computer, HiveMind coordinates your existing fleet of machines (GPU workstations, cloud servers, and developer laptops) into an autonomous software engineering team:
 
-* **Master Node (Lead Architect):** Decomposes your high-level engineering goal into distinct implementation strategies and delegates them across available worker machines.
-* **Worker Fleet (Developer Fleet):** Run independent, headless AI coding sessions (Claude Code, Antigravity CLI `agy`, Aider) in isolated Git branches. Each machine writes code, builds, and executes test suites on its local hardware.
-* **Synthesizer Engine:** Evaluates candidate solutions, prunes dead-end attempts early, shares real-time discoveries between workers, and merges the winning code—or combines the best parts of multiple branches—into your main codebase.
+* **Master Node (Lead Architect):** Runs the `hive` CLI. Discovers fleet nodes over Tailscale or local subnets, decomposes coding goals into parallel implementation strategies, and dispatches them across workers.
+* **Worker Fleet (`hivemind-worker` Daemons):** Lightweight HTTP daemons running on port `7422` of each worker machine. Each daemon manages headless AI coding sessions (Claude Code, Antigravity CLI `agy`, Aider) in isolated Git branches, running builds, tests, and benchmark suites on local hardware.
+* **Git Origin Synchronization:** All code changes travel through isolated experimental branches (`exp/<worker>-<strategy>`) on your shared Git remote (GitHub, GitLab, or self-hosted). The master machine reviews and merges the winning solution into your main branch.
 
 ---
 
 ## 2. Key Features
 
-* **Ad-Hoc Multi-Machine Dispatch**: Connect 2–5 mixed machines with zero complex cloud infrastructure—currently operates over direct SSH across your local Wi-Fi / Ethernet network (with cloud/mesh network support coming in future phases).
-* **Competitive Strategy Exploration**: Run $N$ parallel implementations of a difficult problem (e.g., SIMD vs. Actor Queues vs. Memory-Mapped files) and benchmark them automatically.
-* **Progress-Aware Early Pruning**: Watchdog automatically halts stuck or regressing agent runs, preventing runaway token costs.
-* **Live Cross-Worker Knowledge Bus**: Insights or bug discoveries found on one node are broadcast to all other running workers in real time.
-* **Multi-Branch Hybrid Synthesis**: Combines the best parts from different workers (e.g., algorithm from Worker 1 + test suite from Worker 2) into one unified Pull Request.
-* **Hardware-Aware Routing**: Directs GPU-intensive or heavy build tasks to machines with matching hardware profiles.
+* **Zero-SSH HTTP Daemon Transport**: Master communicates with workers via authenticated REST API calls over port `7422`. No SSH server configuration, passwordless key juggling, or raw shell exposure required on worker machines.
+* **Cross-Platform Compatibility**: Full native support for **Linux** and **Windows** across both master and worker nodes.
+* **Automatic Fleet Discovery**: One-command instant discovery across Tailscale mesh networks (`hive discover --tailscale`) and local subnets (`hive discover --local`).
+* **Competitive Strategy Exploration**: Run $N$ parallel implementations of complex features (e.g., SIMD vs. Actor Queues vs. Memory-Mapped files) concurrently.
+* **Hardware-Aware Tool Detection**: Automatically detects installed AI engines (`claude-code`, `agy`, `aider`), CPU core count, available RAM, and Git readiness at probe time.
+* **Isolated Branch Workflows**: Autonomous agents only edit code in designated workspace branches. The worker daemon safely manages git branching, commit creation, and branch pushes.
 
 ---
 
-## 3. Installation & Setup
-
-Follow these steps to clone the repository and set up HiveMind:
-
-### Prerequisites
-* **Python**: 3.10 or higher
-* **Git**: Installed and configured on your system
-* **SSH**: Installed and accessible from your command line
-* **Coding Agents (on worker machines)**: At least one supported coding CLI installed on target machines (`claude-code`, `agy`, or `aider`)
-* **Git remotes**: Master and workers must already be able to clone and push the shared origin (`repo_url`). HiveMind does not store git tokens. Do not install `hive` on workers.
-
-### Clone and Install
-
-```bash
-git clone https://github.com/your-username/HiveMind.git
-cd HiveMind
-```
-
-#### Option A: Fast Global Setup with `uv` (Recommended)
-```bash
-uv tool install -e .
-```
-
-#### Option B: Standard Setup with `pip`
-```bash
-python -m venv .venv
-# Activate virtual environment:
-# Windows (PowerShell): .venv\Scripts\Activate.ps1
-# Linux / macOS:        source .venv/bin/activate
-pip install -e .
-```
-
-> **Tip with `uv`:** If you prefer running without global install, you can also run directly inside the repo using `uv run hive <command>` (e.g. `uv run hive discover`).
-
-After installation, both the **`hive`** and **`hivemind`** commands will be available globally in your terminal.
-
----
-
-
-## 4. How to Run the CLI (`hive` / `hivemind`)
-
-HiveMind can be run using either the **`hive`** or **`hivemind`** command interchangeably:
-
-```bash
-hive --help
-hivemind --help   # identical
-```
-
----
-
-### 🔁 Workflow Overview
+## 3. Architecture & Workflow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                          MASTER MACHINE (you)                               │
 │                                                                             │
-│  1. hive discover ──► scans LAN, probes SSH, saves ~/.hivemind/cluster.json │
-│  2. hive check    ──► verifies SSH + Git + agent CLI on every worker        │
-│  3. hive dispatch ──► uploads worker.sh + prompt, starts nohup job via SSH  │
-│  4. hive status   ──► SSHes in, reads result.json, prints live table        │
-│  5. hive merge    ──► git fetch origin <exp/branch>, diff preview, merge    │
+│  1. hive keygen   ──► Generates fleet API key (~/.hivemind/fleet.key)       │
+│  2. hive discover ──► Probes port 7422 across Tailscale / LAN, saves cluster│
+│  3. hive check    ──► GET /health on every worker to verify daemon readiness│
+│  4. hive dispatch ──► POST /dispatch with task prompt, repo URL, test cmd   │
+│  5. hive status   ──► GET /status/{run_id} polling, renders live table      │
+│  6. hive merge    ──► git fetch origin exp/* branch, diff preview, merge    │
 └──────────────────────────────────┬──────────────────────────────────────────┘
-                                   │ SSH (BatchMode, no password)
+                                   │ HTTP REST (Port 7422 + Bearer Token)
                     ┌──────────────▼───────────────┐
-                    │       WORKER MACHINE(S)      │
+                    │    WORKER DAEMON (Port 7422) │
+                    │       (hivemind-worker)      │
                     │                              │
-                    │  worker.sh (uploaded by      │
-                    │  master each dispatch):      │
-                    │                              │
-                    │  a) clone / fetch origin     │
-                    │  b) checkout exp/<w>-<s>     │
-                    │  c) run aider / claude / agy │
-                    │  d) run --test command       │
-                    │  e) git commit + push branch │
-                    │  f) write result.json        │
+                    │  a) POST /dispatch received  │
+                    │  b) git clone / fetch repo   │
+                    │  c) checkout exp/<w>-<s>     │
+                    │  d) run aider / agy / claude │
+                    │  e) run --test command       │
+                    │  f) git commit + git push    │
+                    │  g) update status & logs     │
+                    └──────────────┬───────────────┘
+                                   │ git push origin exp/<w>-<s>
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │      Shared Git Origin       │
+                    │   (GitHub / GitLab / etc.)   │
+                    │        exp/<w>-<s>           │ ◄── master fetches winner
                     └──────────────────────────────┘
-                           │ git push
-                           ▼
-                    ┌─────────────┐
-                    │  Git Origin │   (GitHub / GitLab / self-hosted)
-                    │  exp/<w>-<s>│ ◄── master fetches winner here
-                    └─────────────┘
 ```
-
-> **Current test setup (Stage 1A — [validated ✅](ROADMAP.md#phase-1-mvp-core-runner--hive-cli-the-foundation)):**
-> - **Master:** Windows machine, `hive` CLI installed via `uv tool install -e .`
-> - **Worker (`ari`):** Debian Linux machine on same LAN, passwordless SSH
-> - **Agent:** `aider` with model **`openrouter/openrouter/free`**
->   - Requires `OPENROUTER_API_KEY` on the worker — see [Step 4](#step-4-point-the-cluster-at-a-shared-git-origin) for placement guidance
-> - **Origin:** GitHub repo (SSH clone URL)
 
 ---
 
-### Step 1: Discover Devices on Your Local Network
+## 4. Installation & Setup
 
-Scan your local Wi-Fi or Ethernet subnet to find active machines with open SSH ports and interactively configure your global cluster (`~/.hivemind/cluster.json`):
+### Master Machine Setup (`hive`)
+
+The master machine runs the `hive` orchestration CLI.
+
+#### 1. Clone the repository:
+```bash
+git clone https://github.com/your-username/HiveMind.git
+cd HiveMind
+```
+
+#### 2. Install using `uv` (Recommended) or `pip`:
+```bash
+# Option A: Fast Global Setup with uv
+uv tool install -e .
+
+# Option B: Using standard pip in virtualenv
+python -m venv .venv
+# Windows: .venv\Scripts\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
+pip install -e .
+```
+
+#### 3. Generate your Fleet API Key:
+```bash
+hive keygen
+```
+This generates a secure key and saves it to `~/.hivemind/fleet.key`.
+
+---
+
+### Worker Machine Setup (`hivemind-worker`)
+
+Worker machines run the standalone `hivemind-worker` daemon. They do **not** need the master `hive` CLI. Clone the [hivemind-worker](https://github.com/lakshya076/hivemind-worker) repo first.
+
+#### 1. Install `hivemind-worker`:
+```bash
+cd hivemind-worker
+uv tool install -e .    # or: pip install -e .
+```
+
+#### 2. Authorize with your Fleet API Key:
+```bash
+# Run once with --save to store configuration in ~/.hivemind/worker.json
+hivemind-worker start --key <YOUR_FLEET_KEY> --port 7422 --save
+```
+> FLEET_KEY was generated during `hive keygen` command.
+
+#### 3. Ensure AI Coding Agents & Git are Available:
+Ensure at least one supported AI coding CLI is installed and accessible on the worker:
+* **Aider**: `pip install aider-chat` (Export `OPENROUTER_API_KEY` or model API key in `~/.bashrc` / `~/.env`)
+* **Antigravity CLI (`agy`)**: Install `agy` (Export `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY`)
+* **Claude Code**: Install `claude-code` (Export `ANTHROPIC_API_KEY`)
+* **Git**: Configured with push access to your shared repositories.
+
+---
+
+## 5. CLI Command Reference
+
+Both `hive` and `hivemind` can be used interchangeably.
+
+### Step 1: Generate Fleet API Key (`hive keygen`)
 
 ```bash
+hive keygen
+```
+Creates a new fleet authorization token and saves it to `~/.hivemind/fleet.key`.
+
+### Step 2: Discover Devices (`hive discover`)
+
+HiveMind provides **two complementary detection strategies** to locate and audit worker machines across your fleet:
+
+1. **Approach A: Tailscale Mesh Network (`--tailscale`) [Recommended]**  
+   Queries the local Tailscale daemon (`tailscale status --json`) for instant ($<0.1\text{s}$) zero-config discovery of all active peer nodes across your private Tailnet. Works seamlessly across different networks, cloud VMs, and home routers with full end-to-end WireGuard encryption.
+2. **Approach B: Local Subnet Scan (`--local`)**  
+   Performs a fast concurrent ARP and TCP port scan across your local Wi-Fi or Ethernet IPv4 subnet (e.g. `192.168.1.0/24`) to find active computers on the same physical network.
+
+```bash
+# Discover Tailscale peers (Instant mesh network discovery)
+hive discover --tailscale
+
+# Scan local subnet (Wi-Fi / Ethernet)
+hive discover --local
+
+# Interactive mode (prompts to choose between Tailscale or Local scan)
 hive discover
 ```
 
-Probes active IPs, checks SSH port 22, auto-detects remote CPU/RAM/Docker capabilities, and saves selected machines to your global cluster config.
+Probes port `7422` on candidate IPs, queries `/health` for live OS, CPU, RAM, and AI engine status, and saves selected nodes to `~/.hivemind/cluster.json`.
 
-### Step 2: Inspect Your Configured Cluster
+> 📘 **Network Configuration & Pre-Flight Setup:**  
+> Before running discovery, ensure your routers, firewalls, and worker machines are prepared (e.g. disabling Wi-Fi AP Isolation, opening port 7422, or joining your Tailnet).  
+> 👉 **See the detailed [Network & Machine Preparation Guide (NETWORK_SETUP.md)](NETWORK_SETUP.md)** for step-by-step setup on Linux, Windows, and macOS.
 
-View all configured worker nodes, their SSH targets, assigned AI coding engines, and hardware capabilities:
+### Step 3: Inspect Cluster (`hive list`)
+
+View your configured cluster nodes and their hardware capabilities:
 
 ```bash
 hive list
 ```
 
-### Step 3: Run Cluster Health & Readiness Checks
+### Step 4: Audit Cluster Readiness (`hive check`)
 
-Test SSH reachability, Git installation, and AI agent CLI readiness across all configured machines:
+Verify real-time HTTP reachability, Git readiness, and AI agent status across all nodes:
 
 ```bash
 hive check
 ```
 
-### Step 4: Point the Cluster at a Shared Git Origin
+### Step 5: Dispatch a Parallel Swarm Job (`hive dispatch`)
 
-Workers clone this repo, push `exp/<worker>-<strategy>` branches to it, and `hive merge` fetches the winner from origin. Set `repo_url` in `~/.hivemind/cluster.json` - or pass `--repo` on every `hive dispatch` call.
-
-```json
-{
-  "cluster_name": "hive-local-fleet",
-  "repo_url": "git@github.com:you/your-project.git",
-  "workers": [
-    {
-      "id": "ari",
-      "host": "192.168.1.20",
-      "user": "developer",
-      "workspace_dir": "~/workspace/your-project",
-      "agent_engine": "aider"
-    }
-  ]
-}
-```
-
-The coding CLI (`aider`, `claude`, or `agy`) must be installed on each **worker**. `hive` itself stays on the master only — workers do not install HiveMind.
-
-> **Agent engine options:**
->
-> | Engine | `agent_engine` value | Default model | Auth needed on worker |
-> |--------|---------------------|---------------|-----------------------|
-> | Aider | `"aider"` | `openrouter/openrouter/free` | `OPENROUTER_API_KEY` |
-> | Antigravity (`agy`) | `"agy"` | `gemini-3.7-flash-medium` | `GOOGLE_API_KEY` or `ANTHROPIC_API_KEY` (depending on model) |
-> | Claude Code | `"claude-code"` | system default | `ANTHROPIC_API_KEY` |
->
-> **Aider + OpenRouter:** Export `OPENROUTER_API_KEY` **unconditionally** in `~/.bashrc` — place it
-> **before** any `case $-` interactive-shell guard, or in `~/.env` (the worker wrapper loads both).
-> If the key is missing, aider opens a browser OAuth flow and hangs indefinitely.
->
-> **agy:** Runs as `agy -p "<prompt>" --model <model>` in non-interactive mode.
-> Ensure the API key for your chosen model is exported on the worker.
-> Override the default model per-run with `hive dispatch --model <id>` (e.g. `--model claude-sonnet-4-6`).
-
-### Step 5: Dispatch a Parallel Swarm Task
+Dispatch a task to one or more worker machines:
 
 ```bash
-# Minimal — positional prompt, repo from cluster.json
-hive dispatch "Fix the off-by-one error in parser.py" --test "python3 -m pytest -q"
+# Minimal: Positional prompt, pass repo_url in cluster.json
+hive dispatch "Fix the bug in add.py so that add(a, b) returns a + b" --test "python3 check.py"
 
-# Override repo for this run
-hive dispatch "Add retries to the HTTP client" \
-  --repo git@github.com:you/sample.git \
-  --workers <worker-name>
+# Explicit repo URL and target workers
+hive dispatch "Refactor database query engine" \
+  --repo https://github.com/you/repo.git \
+  --workers ari,hermes \
+  --test "pytest tests/ -q"
 
-# Two workers, two explicitly named strategies
-hive dispatch "Optimize the query engine for >100k req/s" \
-  --strategy "simd" \
-  --strategy "actor-queues"
-
-# With benchmark
-hive dispatch "Speed up sort()" \
-  --test "python3 -m pytest -q" \
-  --bench "python3 -m pytest --benchmark-json=bench.json"
+# Multiple named strategies
+hive dispatch "Optimize sorting algorithm" \
+  --strategy "quicksort-simd" \
+  --strategy "timsort-parallel" \
+  --test "pytest -q" \
+  --bench "python benchmark.py"
 ```
 
-| Flag | Description |
-|------|-------------|
-| `"<prompt>"` | *(required)* Task description — positional first arg |
-| `--repo <url>` | Git SSH/HTTPS URL — overrides `cluster.json` `repo_url` |
-| `--workers id1,id2` | Subset of cluster workers (default: all) |
-| `--strategy NAME` | Repeatable — one strategy name per worker. Auto-names `strategy-1..N` if omitted |
-| `--test <cmd>` | Shell command run after agent exits; exit code stored in `result.json` |
-| `--bench <cmd>` | Benchmark command; JSON output stored alongside result |
-| `--model <id>` | Override the agent model (e.g. `gemini/gemini-2.5-pro`) |
+| Option | Description |
+|---|---|
+| `PROMPT` | *(Required)* The task instruction for the AI agents |
+| `--repo <url>` | Git origin URL (overrides `repo_url` in `cluster.json`) |
+| `--workers <id1,id2>` | Comma-separated worker IDs (default: all workers) |
+| `--strategy <name>` | Named strategy (repeatable, e.g. `--strategy simd --strategy async`) |
+| `--test <cmd>` | Test command executed after agent completes |
+| `--bench <cmd>` | Benchmark command producing JSON output |
+| `--model <id>` | Model override for the worker engine |
 
-Dispatch is **async** — it starts `nohup` jobs over SSH and returns immediately. The coding agent does not own `git commit` or `git push`; the uploaded `worker.sh` wrapper does.
+### Step 6: Track Live Execution (`hive status`)
 
-### Step 6: Watch Progress
+Poll the status of active and recent swarm runs:
 
 ```bash
-hive status                                   # latest run
-hive status --run 20261002-123000-ab12cd34    # specific run
+hive status                                   # Check latest run
+hive status --run 20261006-174456-add56543    # Check specific run
 ```
 
-Polls each worker's `result.json` over SSH and renders a live Rich table:
+Displays a live table with strategy names, branch names, execution status (`starting`, `running`, `succeeded`, `failed`), test exit codes, and output snippets.
 
-```
-                     Run 20261002-081203-03189faa
-┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┓
-┃ Worker ┃ Strategy   ┃ Branch             ┃ Status    ┃ Tests ┃ Details ┃
-┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━┩
-│ ari    │ strategy-1 │ exp/ari-strategy-1 │ succeeded │ pass  │         │
-└────────┴────────────┴────────────────────┴───────────┴───────┴─────────┘
-```
+### Step 7: Inspect & Merge Winner (`hive merge`)
 
-### Step 7: Merge a Winner
-
-Run this from a **local clone** of the same origin (the directory where you normally develop):
+Run from your local development repository clone:
 
 ```bash
-cd ~/projects/your-project   # must be a clone of the same repo_url
+cd ~/workspace/my-project
 hive merge
 ```
 
-HiveMind:
-1. Shows the results table — pick the winning worker ID
-2. Force-fetches the winning `exp/…` branch from origin
-3. Shows a `git diff --stat` preview
-4. Merges into your local `main`/`master` (no-ff commit)
-5. Leaves `git push` to you
+1. Displays completed worker runs with test outcomes.
+2. Prompts you to pick the winning worker strategy.
+3. Fetches the winning branch (`exp/<worker>-<strategy>`) from the Git remote.
+4. Previews the `git diff --stat`.
+5. Merges the branch cleanly into your current local branch.
 
 ---
 
+## 6. Running `hivemind-worker` as a Persistent Service
 
+To ensure worker nodes are always online and auto-start on system boot:
 
-## 5. What Happens on a Worker Machine
+### Linux (systemd Service)
 
-This section explains exactly what `hive dispatch` triggers on the worker and how the result flows back to you. Nothing here requires HiveMind to be installed on the worker.
-
----
-
-### Step 1 — Master uploads three files over SSH
-
-Every dispatch creates a run directory on the worker:
-
-```
-~/hive-testing/.hive/runs/<run-id>/
-├── worker.sh    ← the full execution script (POSIX sh, no hive required)
-├── job.env      ← shell exports: RUN_ID, REPO_URL, BRANCH, AGENT_COMMAND, TEST_COMMAND, ...
-└── prompt.txt   ← the task text (written to a file so shell quoting can't corrupt it)
-```
-
-Then the master fires it off and returns immediately:
-
-```bash
-nohup bash worker.sh > wrapper.log 2>&1 &
-# master exits SSH; job keeps running in background under nohup
-```
-
----
-
-### Step 2 — worker.sh runs autonomously
-
-`worker.sh` sources `job.env` and executes the full pipeline without any further input from the master:
-
-```
-worker.sh
-│
-├─ Load env vars
-│     sources ~/.profile, ~/.bash_profile
-│     extracts export lines from ~/.bashrc with grep
-│     (bypasses the interactive-shell guard at top of ~/.bashrc)
-│     also loads ~/.env if present
-│
-├─ Clone or fetch origin
-│     if workspace is empty    → git clone <REPO_URL> <workspace>
-│     if workspace exists      → verify origin matches REPO_URL, then git fetch
-│     if origins differ        → abort (writes result.json: failed)
-│
-├─ Dirty tree check
-│     only tracked modifications (modified/staged/deleted) block dispatch
-│     untracked files (e.g. leftover .gitignore) are ignored
-│
-├─ Checkout base + experiment branch
-│     git checkout -B main origin/main     (fast-forward base)
-│     git checkout -B exp/ari-strategy-1   (fresh experiment branch)
-│
-├─ Write .gitignore entries
-│     adds .hive/ and .aider* so hive run files are never committed
-│
-├─ Run the coding agent  (command built from agent_engine in cluster.json)
-│     aider:  aider --model openrouter/openrouter/free \
-│                    --message "$(cat prompt.txt)" \
-│                    --yes-always --no-auto-commits --no-dirty-commits
-│     agy:    agy -p "$(cat prompt.txt)" --model gemini-3.7-flash-medium
-│     claude: claude -p "$(cat prompt.txt)"
-│     stdout → agent.log
-│     agent edits files only. It does NOT commit or push.
-│
-├─ Run the test command (if --test was given)
-│     e.g.: python3 check.py  →  test.log
-│     exit code saved as test_exit_code
-│
-├─ Commit
-│     git add -A
-│     git commit -m "hive: strategy-1 on ari (<run-id>)"
-│     (skipped if agent made no file changes)
-│
-├─ Push branch to origin
-│     git push --force origin exp/ari-strategy-1
-│     → branch now lives on GitHub (or your git host)
-│     failure here marks the worker as failed
-│
-└─ Write result.json  ← this is the completion signal
-      {
-        "status": "succeeded",
-        "branch": "exp/ari-strategy-1",
-        "agent_exit_code": 0,
-        "test_exit_code": 0,
-        "benchmark_path": null,
-        "error": null
-      }
-```
-
-> **Key design rule:** The coding agent (aider/claude/agy) **only edits files**. It never touches git.
-> All git operations — checkout, commit, push — are done by `worker.sh`. This means:
-> - The agent cannot push to the wrong branch
-> - The agent cannot skip the test run
-> - The agent cannot corrupt the branch name or run metadata
-
----
-
-### Step 3 — hive status reads result.json over SSH
-
-`result.json` is the **completion signal**. It does not exist while the job is still running.
-
-```
-hive status
-  └─ SSH into worker
-       ├─ cat .hive/runs/<run-id>/result.json
-       │     found  → parse status, branch, test exit code → show table
-       │     missing → job still running → show "running / unknown"
-       └─ tail -20 agent.log  (shown in Details column on failure)
-```
-
-> **Note:** `hive check` is a separate command — it tests SSH connectivity, git version, and agent CLI presence. It has nothing to do with run results. Only `hive status` reads `result.json`.
-
----
-
-### Step 4 — Code travels through origin, never directly between machines
-
-```
-WORKER                      GITHUB ORIGIN               MASTER (your local clone)
-──────────────      ──────────────      ────────────────────────
-aider edits files
-git commit
-git push ─────────› branch-name
-writes result.json                                          hive status (SSH reads result.json)
-                                                            hive merge
-                                           exp/branch-name ‐‐‐‐‐‐‐‐‐— git fetch origin
-                                                            git merge (into local main)
-                                                            ↓ you review diff
-                                                            git push  (you do this)
-```
-
-The master **never reads the worker's code files directly** over SSH. It only reads `result.json` and log tails. The code itself always travels through the shared git origin.
-
----
-
-## 5B. Running `hivemind-worker` as a Persistent Background Service (Auto-Start on Boot)
-
-To ensure worker machines are always online and ready for swarm tasks without needing to manually start the daemon after every reboot, configure `hivemind-worker` as an auto-starting background service:
-
-### 🐧 Linux (Ubuntu / Debian / systemd)
-
-#### Option 1: System Service (Recommended)
-
-1. Save your fleet key and default port on the worker first:
+1. Save configuration on the worker:
    ```bash
    hivemind-worker start --key <FLEET_KEY> --port 7422 --save
    ```
 
-2. Create a systemd unit file at `/etc/systemd/system/hivemind-worker.service`:
+2. Create `/etc/systemd/system/hivemind-worker.service`:
    ```ini
    [Unit]
    Description=HiveMind Worker Daemon
@@ -445,212 +294,89 @@ To ensure worker machines are always online and ready for swarm tasks without ne
    [Install]
    WantedBy=multi-user.target
    ```
-   *(Replace `lakshya` and the executable path with your worker's actual user and `which hivemind-worker` output).*
+   *(Update `lakshya` and executable path to match `which hivemind-worker`).*
 
-3. Enable and start the service:
+3. Enable and start:
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable --now hivemind-worker
    ```
 
-4. Verify status and live logs:
+4. Check logs:
    ```bash
-   sudo systemctl status hivemind-worker
    journalctl -u hivemind-worker -f
    ```
 
 ---
 
-### 🪟 Windows
+### Windows (Background / Task Scheduler / NSSM)
 
 #### Method 1: Run in Background for Current Session (No Auto-Startup)
 
-If you only want to run the worker in the background while you are using your computer (stops when closed or rebooted):
-
-* **Option A: Hidden Background Process (PowerShell)**
+* **Hidden Background Process (PowerShell):**
   ```powershell
-  Start-Process -WindowStyle Hidden -FilePath "hivemind-worker" -ArgumentList "start" -RedirectStandardOutput "$env:USERPROFILE\.hivemind\worker.log" -RedirectStandardError "$env:USERPROFILE\.hivemind\worker.log"
+  Start-Process -WindowStyle Hidden -FilePath "hivemind-worker" -ArgumentList "start"
   ```
-  *To stop the background worker:*
-  ```powershell
-  Stop-Process -Name "hivemind-worker" -Force
-  ```
+  *To stop:* `Stop-Process -Name "hivemind-worker" -Force`
 
-* **Option B: PowerShell Background Job**
+* **PowerShell Background Job:**
   ```powershell
   Start-Job -Name "HiveMindWorker" -ScriptBlock { hivemind-worker start }
   ```
-  *To view status or stop:*
-  ```powershell
-  Get-Job -Name "HiveMindWorker"
-  Receive-Job -Name "HiveMindWorker" -Keep   # View logs
-  Stop-Job -Name "HiveMindWorker"           # Stop job
-  ```
+  *To view logs:* `Receive-Job -Name "HiveMindWorker" -Keep`  
+  *To stop:* `Stop-Job -Name "HiveMindWorker"`
 
----
+#### Method 2: Auto-Start via Windows Task Scheduler (Recommended)
 
-#### Method 2: Auto-Start on System Startup / Logon
-
-##### Option A: Windows Task Scheduler (No Extra Software Required)
-
-Run in PowerShell as Administrator to create a scheduled task that auto-starts `hivemind-worker` silently in the background whenever the user logs on:
+Run in PowerShell as Administrator:
 
 ```powershell
 # 1. Save config with fleet key once
 hivemind-worker start --key <FLEET_KEY> --port 7422 --save
 
-# 2. Register scheduled task to run silently on user login
+# 2. Register scheduled task to start silently on login
 $Action = New-ScheduledTaskAction -Execute "hivemind-worker.exe" -Argument "start"
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName "HiveMindWorker" -Action $Action -Trigger $Trigger -Settings $Settings -Description "HiveMind Worker AI Fleet Daemon"
 ```
 
-##### Option B: Windows Service via NSSM (Runs even when logged out)
+#### Method 3: Windows Service via NSSM (Runs even when logged out)
 
-If you want the daemon to run as a full Windows background service (even before user logs in):
-
-1. Download [NSSM (Non-Sucking Service Manager)](https://nssm.cc/) or install via Scoop/Chocolatey:
-   ```powershell
-   scoop install nssm   # or: choco install nssm
-   ```
-
-2. Install and start the service:
-   ```powershell
-   $WorkerPath = (Get-Command hivemind-worker).Source
-   nssm install HiveMindWorker $WorkerPath "start"
-   nssm set HiveMindWorker AppStdout "$env:USERPROFILE\.hivemind\worker-service.log"
-   nssm set HiveMindWorker AppStderr "$env:USERPROFILE\.hivemind\worker-service.log"
-   nssm start HiveMindWorker
-   ```
-
-3. Manage service anytime:
-   ```powershell
-   nssm status HiveMindWorker
-   nssm restart HiveMindWorker
-   ```
-
----
-
-## 6. SSH Setup & Troubleshooting Guide
-
-> ℹ️ **Local Network Focus (Current Phase):** HiveMind currently operates over **direct SSH for local network machines connected on the same Wi-Fi / Ethernet subnet** to trigger isolated Git branching and headless coding agent sessions on your worker nodes. Support for remote/cloud machines across different networks will be expanded in subsequent phases.
-
----
-
-### Is it necessary to open Port 22?
-
-* **On Local Networks (Same Wi-Fi / Ethernet):**  
-  **Yes.** The worker machine must have an SSH server running and listening on Port 22 (or a designated custom port), and the worker's local OS firewall must allow inbound TCP connections on that port.
-* **Across Remote Networks / Internet (Future Phases):**  
-  When using mesh networks (such as NetBird or Tailscale) or SSH tunnels in future phases, public router port-forwarding is not required because the tunnel handles secure peer-to-peer routing.
-
----
-
-### How to Enable SSH & Open Port 22 on Worker Machines
-
-#### On Ubuntu / Debian Linux:
-```bash
-# Install OpenSSH Server
-sudo apt update && sudo apt install openssh-server -y
-
-# Enable and start the SSH service
-sudo systemctl enable --now ssh
-
-# Allow Port 22 in the firewall (UFW)
-sudo ufw allow 22
-```
-
-#### On Windows (PowerShell as Administrator):
 ```powershell
-# Install OpenSSH Server
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+# Install NSSM (via scoop or choco)
+scoop install nssm
 
-# Start the service and set to Automatic startup
-Start-Service sshd
-Set-Service -Name sshd -StartupType 'Automatic'
-
-# Allow inbound Port 22 in Windows Firewall
-New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+# Configure service
+$WorkerPath = (Get-Command hivemind-worker).Source
+nssm install HiveMindWorker $WorkerPath "start"
+nssm set HiveMindWorker AppStdout "$env:USERPROFILE\.hivemind\worker-service.log"
+nssm set HiveMindWorker AppStderr "$env:USERPROFILE\.hivemind\worker-service.log"
+nssm start HiveMindWorker
 ```
-
-#### On macOS:
-1. Open **System Settings** $\to$ **General** $\to$ **Sharing**.
-2. Toggle **Remote Login** to **ON**.
 
 ---
 
-### Configuring Passwordless SSH Authentication
+## 7. Security Model
 
-HiveMind executes tasks automatically and requires **passwordless SSH key authentication** between your Master machine and Worker nodes.
-
-If `hive check` shows `AUTH REQUIRED` or `Permission denied (publickey)`:
-
-#### Step 1: Generate an SSH Key on your Master Machine (if you don't have one):
-```bash
-ssh-keygen -t ed25519
-```
-*(Press Enter on all prompts to accept defaults).*
-
-#### Step 2: Copy your Public Key to the Worker Machine:
-
-* **From Linux / macOS Master:**
-  ```bash
-  ssh-copy-id <worker-username>@<worker-ip>
-  ```
-* **From Windows PowerShell Master:**
-  ```powershell
-  type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh <worker-username>@<worker-ip> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
-  ```
-  *(Enter the worker machine's password once to authorize the key).*
-
-#### Step 3: Verify Passwordless Login:
-```bash
-ssh <worker-username>@<worker-ip> "echo OK"
-```
-If this prints `OK` without asking for a password, run `hive check` to confirm that all nodes show `SSH Reachable: YES` and `Git Ready: YES`.
+| Mechanism | Detail |
+|---|---|
+| **Restricted REST Endpoints** | Only 4 typed endpoints exposed (`/health`, `/dispatch`, `/status`, `/cancel`). No arbitrary shell execution endpoints. |
+| **Fleet Key Bearer Token** | All requests require `Authorization: Bearer <FLEET_KEY>` authentication. Unauthorized requests are rejected immediately with HTTP 401. |
+| **Workspace Isolation** | Task execution is strictly isolated inside designated workspace directories (e.g. `~/hive-workspace/<run_id>`). |
+| **Stripped Subprocess Environment** | Agent subprocesses run with a sanitized environment containing only essential system variables and AI provider keys. Personal credentials and sensitive session tokens are stripped. |
+| **Tailscale Mesh Encryption** | When communicating over Tailscale (`100.x.x.x`), all peer-to-peer traffic is end-to-end encrypted with WireGuard. |
 
 ---
 
-### Using `~/.ssh/config` Host Aliases or Cloudflare Tunnels
+## 8. Project Documentation
 
-If you have pre-configured SSH host aliases or Cloudflare Tunnels in your `~/.ssh/config` (for example: `Host homelab`):
-
-You can use the alias name directly as the `host` in `~/.hivemind/cluster.json`:
-
-```json
-{
-  "cluster_name": "hive-fleet",
-  "repo_url": "git@github.com:you/tiny-add.git",
-  "workers": [
-    {
-      "id": "ari",
-      "host": "homelab",
-      "user": "developer",
-      "workspace_dir": "~/workspace/project",
-      "agent_engine": "aider"
-    }
-  ]
-}
-```
-
-HiveMind will route the connection using your existing SSH config rules, proxy commands, and identity files automatically.
-
----
-
-## 7. Project Documentation
-
-* **[Architecture & Deep Analysis](DISTRIBUTED_AI_CODING_SYSTEM.md)**: Deep dive into distributed agent mechanics, problem analysis, market landscape, and technical solutions for all 5 industry gaps.
-* **[Development Roadmap](ROADMAP.md)**: Phased engineering milestones, task checklists, and technical deliverables.
-
----
-
-## 8. Contributing & Community
-
-Contributions, issues, and feature requests are welcome! Feel free to check the [Roadmap](ROADMAP.md) to see what is currently in progress.
+* **[Network & Machine Preparation Guide](NETWORK_SETUP.md)**: Detailed instructions for configuring Tailscale, local LAN firewalls, router settings, Git keys, and worker daemons.
+* **[Architecture & Deep Analysis](DISTRIBUTED_AI_CODING_SYSTEM.md)**: Comprehensive analysis of distributed AI agent architectures, coordination patterns, and industry gap resolutions.
+* **[Development Roadmap](ROADMAP.md)**: Multi-phase engineering roadmap, milestone deliverables, and validation history.
 
 ---
 
 ## 9. License
 
-This project is licensed under the MIT License - see the [LICENSE](license.txt) file for details.
+This project is licensed under the MIT License - see the [license.txt](license.txt) file for details.

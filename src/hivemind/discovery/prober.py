@@ -1,75 +1,70 @@
 import subprocess
-from typing import List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+
+from hivemind.config.cluster import get_fleet_key
 
 
 class SystemProber:
-    """Probes local or remote machines over SSH to detect accurate hardware, OS, and tool tags."""
-
-    # Cross-platform single-line Python probe command that works in bash, sh, cmd, and PowerShell
-    PROBE_CMD = (
-        'python3 -c "'
-        'import os, sys, platform, shutil, subprocess; '
-        'tags = [f\'os-{platform.system().lower()}\', f\'arch-{platform.machine().lower()}\']; '
-        'cores = os.cpu_count() or 1; '
-        'tags.append(f\'{cores}-cores\'); '
-        'tags.append(\'high-cpu\' if cores >= 16 else (\'standard-cpu\' if cores <= 4 else \'multi-core\')); '
-        'tools = [(\'docker\', \'docker\'), (\'claude\', \'engine:claude-code\'), (\'agy\', \'engine:agy\'), (\'aider\', \'engine:aider\'), (\'uv\', \'uv\')]; '
-        '[tags.append(tag) for cmd, tag in tools if shutil.which(cmd)]; '
-        'print(\'__HIVE_PROBE__:\' + \',\'.join(tags))" '
-        '2>/dev/null || '
-        'python -c "'
-        'import os, sys, platform, shutil; '
-        'tags = [f\'os-{platform.system().lower()}\', f\'arch-{platform.machine().lower()}\']; '
-        'cores = os.cpu_count() or 1; '
-        'tags.append(f\'{cores}-cores\'); '
-        'tags.append(\'high-cpu\' if cores >= 16 else (\'standard-cpu\' if cores <= 4 else \'multi-core\')); '
-        'tools = [(\'docker\', \'docker\'), (\'claude\', \'engine:claude-code\'), (\'agy\', \'engine:agy\'), (\'aider\', \'engine:aider\'), (\'uv\', \'uv\')]; '
-        '[tags.append(tag) for cmd, tag in tools if shutil.which(cmd)]; '
-        'print(\'__HIVE_PROBE__:\' + \',\'.join(tags))"'
-    )
+    """Probes worker machines via HTTP daemon (or fallback) to detect hardware and tool capabilities."""
 
     @classmethod
-    def probe_remote_detailed(
-        cls, host: str, user: str, port: int = 22, timeout: float = 4.0
-    ) -> Tuple[List[str], Optional[str]]:
-        """Runs a fast non-interactive SSH probe command and returns (tags, error_detail)."""
+    def probe_daemon(
+        cls, host: str, port: int = 7422, timeout: float = 2.5
+    ) -> Tuple[Optional[Dict[str, Any]], List[str], Optional[str]]:
+        """
+        Probe worker node HTTP daemon at http://<host>:<port>/health.
+        Returns (health_data_dict, tags_list, error_message).
+        """
+        url = f"http://{host}:{port}/health"
+        key = get_fleet_key()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+
         try:
-            cmd = [
-                "ssh",
-                "-o", "BatchMode=yes",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", f"ConnectTimeout={int(timeout)}",
-                "-p", str(port),
-                f"{user}@{host}",
-                cls.PROBE_CMD,
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            if res.returncode == 0 and "__HIVE_PROBE__:" in res.stdout:
-                line = [l for l in res.stdout.splitlines() if "__HIVE_PROBE__:" in l][-1]
-                raw_tags = line.split("__HIVE_PROBE__:", 1)[1]
-                tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
-                return tags, None
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.get(url, headers=headers)
+                if resp.status_code == 401:
+                    return None, [], "Auth Failed: Worker rejected Fleet API Key. Verify ~/.hivemind/fleet.key."
+                if resp.status_code != 200:
+                    return None, [], f"HTTP {resp.status_code}: {resp.text}"
 
-            # Diagnose failure from stderr or exit code
-            stderr = res.stderr.lower() if res.stderr else ""
-            if "permission denied" in stderr:
-                return [], "SSH Authentication Required: Public key not authorized on target device"
-            if "connection timed out" in stderr or "timed out" in stderr:
-                return [], "Connection timed out: Target machine did not respond in time"
-            if "connection refused" in stderr:
-                return [], "Connection refused: SSH server is not accepting connections"
-            if res.returncode != 0:
-                return [], f"SSH command failed (exit code {res.returncode})"
+                data = resp.json()
+                tags = []
+                os_val = data.get("os", "unknown")
+                arch_val = data.get("arch", "unknown")
+                tags.append(f"os-{os_val}")
+                tags.append(f"arch-{arch_val}")
 
-        except subprocess.TimeoutExpired:
-            return [], "SSH connection timed out"
+                cores = data.get("cpu_cores", 1)
+                tags.append(f"{cores}-cores")
+                if cores >= 16:
+                    tags.append("high-cpu")
+                else:
+                    tags.append("standard-cpu")
+
+                ram_gb = data.get("ram_gb")
+                if ram_gb:
+                    tags.append(f"{ram_gb}gb-ram")
+
+                for engine in data.get("engines", []):
+                    tags.append(f"engine:{engine}")
+
+                if data.get("git_ready"):
+                    tags.append("git")
+
+                return data, tags, None
+
+        except httpx.ConnectError:
+            return None, [], f"Daemon not reachable on port {port} (install/start hivemind-worker)"
+        except httpx.TimeoutException:
+            return None, [], f"Timed out connecting to port {port}"
         except Exception as exc:
-            return [], f"Probe error: {exc}"
-
-        return [], "No hardware profile tags returned by target"
+            return None, [], f"Probe error: {exc}"
 
     @classmethod
-    def probe_remote(cls, host: str, user: str, port: int = 22, timeout: float = 4.0) -> List[str]:
-        """Backward-compatible helper returning just tags list."""
-        tags, _ = cls.probe_remote_detailed(host, user, port, timeout)
+    def probe_remote(cls, host: str, user: Optional[str] = None, port: int = 7422, timeout: float = 3.0) -> List[str]:
+        """Backward-compatible helper returning tags list."""
+        _, tags, _ = cls.probe_daemon(host, port, timeout)
         return tags
+
