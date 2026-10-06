@@ -461,9 +461,37 @@ To ensure worker machines are always online and ready for swarm tasks without ne
 
 ---
 
-### 🪟 Windows (Auto-Start on Logon / Boot)
+### 🪟 Windows
 
-#### Option 1: Windows Task Scheduler (No Extra Software Required)
+#### Method 1: Run in Background for Current Session (No Auto-Startup)
+
+If you only want to run the worker in the background while you are using your computer (stops when closed or rebooted):
+
+* **Option A: Hidden Background Process (PowerShell)**
+  ```powershell
+  Start-Process -WindowStyle Hidden -FilePath "hivemind-worker" -ArgumentList "start" -RedirectStandardOutput "$env:USERPROFILE\.hivemind\worker.log" -RedirectStandardError "$env:USERPROFILE\.hivemind\worker.log"
+  ```
+  *To stop the background worker:*
+  ```powershell
+  Stop-Process -Name "hivemind-worker" -Force
+  ```
+
+* **Option B: PowerShell Background Job**
+  ```powershell
+  Start-Job -Name "HiveMindWorker" -ScriptBlock { hivemind-worker start }
+  ```
+  *To view status or stop:*
+  ```powershell
+  Get-Job -Name "HiveMindWorker"
+  Receive-Job -Name "HiveMindWorker" -Keep   # View logs
+  Stop-Job -Name "HiveMindWorker"           # Stop job
+  ```
+
+---
+
+#### Method 2: Auto-Start on System Startup / Logon
+
+##### Option A: Windows Task Scheduler (No Extra Software Required)
 
 Run in PowerShell as Administrator to create a scheduled task that auto-starts `hivemind-worker` silently in the background whenever the user logs on:
 
@@ -478,7 +506,7 @@ $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName "HiveMindWorker" -Action $Action -Trigger $Trigger -Settings $Settings -Description "HiveMind Worker AI Fleet Daemon"
 ```
 
-#### Option 2: Windows Service via NSSM (Runs even when logged out)
+##### Option B: Windows Service via NSSM (Runs even when logged out)
 
 If you want the daemon to run as a full Windows background service (even before user logs in):
 
