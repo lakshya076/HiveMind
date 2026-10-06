@@ -1,3 +1,4 @@
+import secrets
 import click
 from typing import Optional
 from rich.console import Console
@@ -9,7 +10,7 @@ from rich.prompt import Prompt, Confirm
 from hivemind.discovery.scanner import NetworkScanner, DiscoveredDevice
 from hivemind.discovery.prober import SystemProber
 from hivemind.discovery.tailscale import TailscaleScanner
-from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_cluster_path
+from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_cluster_path, get_hivemind_home
 from hivemind.runner.dispatch import (
     DispatchError,
     assign_strategies,
@@ -101,6 +102,41 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
 def cli():
     """HiveMind: Distributed AI Coding Agent Fleet Orchestrator."""
     pass
+
+
+@cli.command(name="keygen")
+@click.option("--force", "-f", is_flag=True, default=False, help="Overwrite existing fleet key if present.")
+def keygen_cmd(force: bool):
+    """Generate a shared Fleet API key for securing worker nodes."""
+    key_file = get_hivemind_home() / "fleet.key"
+    if key_file.exists() and not force:
+        existing_key = key_file.read_text(encoding="utf-8").strip()
+        console.print(Panel.fit(
+            f"[bold yellow]Existing Fleet API Key Found:[/bold yellow]\n\n"
+            f"[bold green]{existing_key}[/bold green]\n\n"
+            f"[dim]Stored at: {key_file}[/dim]\n\n"
+            f"[dim]Use [bold white]hive keygen --force[/bold white] to generate a new key.[/dim]",
+            title="HiveMind Fleet Key",
+            border_style="yellow"
+        ))
+        return
+
+    new_key = f"hive-key-{secrets.token_hex(20)}"
+    get_hivemind_home().mkdir(parents=True, exist_ok=True)
+    key_file.write_text(new_key, encoding="utf-8")
+
+    console.print(Panel.fit(
+        f"[bold green]✓ New Fleet API Key Generated Successfully![/bold green]\n\n"
+        f"[bold white]Key:[/bold white] [bold cyan]{new_key}[/bold cyan]\n\n"
+        f"[dim]Saved to:[/dim] [white]{key_file}[/white]\n\n"
+        f"[bold yellow]Next Step on Worker Nodes:[/bold yellow]\n"
+        f"Run on each worker machine to authorize it:\n"
+        f"  [bold white]hivemind-worker start --key {new_key} --save[/bold white]",
+        title="HiveMind Fleet Key",
+        border_style="green"
+    ))
+
+
 
 
 @cli.command(name="discover")
