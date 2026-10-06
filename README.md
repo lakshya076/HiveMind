@@ -17,6 +17,7 @@
 * [4. How to Run the `hive` CLI](#4-how-to-run-the-hive-cli)
   * [Workflow Overview](#-workflow-overview)
 * [5. What Happens on a Worker Machine](#5-what-happens-on-a-worker-machine)
+* [5B. Running `hivemind-worker` as a Persistent Background Service](#5b-running-hivemind-worker-as-a-persistent-background-service-auto-start-on-boot)
 * [6. SSH Setup & Troubleshooting Guide](#6-ssh-setup--troubleshooting-guide)
   * [Is it necessary to open Port 22?](#is-it-necessary-to-open-port-22)
   * [How to Enable SSH & Open Port 22 on Worker Machines](#how-to-enable-ssh--open-port-22-on-worker-machines)
@@ -411,6 +412,95 @@ writes result.json                                          hive status (SSH rea
 ```
 
 The master **never reads the worker's code files directly** over SSH. It only reads `result.json` and log tails. The code itself always travels through the shared git origin.
+
+---
+
+## 5B. Running `hivemind-worker` as a Persistent Background Service (Auto-Start on Boot)
+
+To ensure worker machines are always online and ready for swarm tasks without needing to manually start the daemon after every reboot, configure `hivemind-worker` as an auto-starting background service:
+
+### 🐧 Linux (Ubuntu / Debian / systemd)
+
+#### Option 1: System Service (Recommended)
+
+1. Save your fleet key and default port on the worker first:
+   ```bash
+   hivemind-worker start --key <FLEET_KEY> --port 7422 --save
+   ```
+
+2. Create a systemd unit file at `/etc/systemd/system/hivemind-worker.service`:
+   ```ini
+   [Unit]
+   Description=HiveMind Worker Daemon
+   After=network.target tailscaled.service
+
+   [Service]
+   Type=simple
+   User=lakshya
+   Environment="PATH=/home/lakshya/.local/bin:/usr/local/bin:/usr/bin:/bin"
+   ExecStart=/home/lakshya/.local/bin/hivemind-worker start
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   *(Replace `lakshya` and the executable path with your worker's actual user and `which hivemind-worker` output).*
+
+3. Enable and start the service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now hivemind-worker
+   ```
+
+4. Verify status and live logs:
+   ```bash
+   sudo systemctl status hivemind-worker
+   journalctl -u hivemind-worker -f
+   ```
+
+---
+
+### 🪟 Windows (Auto-Start on Logon / Boot)
+
+#### Option 1: Windows Task Scheduler (No Extra Software Required)
+
+Run in PowerShell as Administrator to create a scheduled task that auto-starts `hivemind-worker` silently in the background whenever the user logs on:
+
+```powershell
+# 1. Save config with fleet key once
+hivemind-worker start --key <FLEET_KEY> --port 7422 --save
+
+# 2. Register scheduled task to run silently on user login
+$Action = New-ScheduledTaskAction -Execute "hivemind-worker.exe" -Argument "start"
+$Trigger = New-ScheduledTaskTrigger -AtLogOn
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "HiveMindWorker" -Action $Action -Trigger $Trigger -Settings $Settings -Description "HiveMind Worker AI Fleet Daemon"
+```
+
+#### Option 2: Windows Service via NSSM (Runs even when logged out)
+
+If you want the daemon to run as a full Windows background service (even before user logs in):
+
+1. Download [NSSM (Non-Sucking Service Manager)](https://nssm.cc/) or install via Scoop/Chocolatey:
+   ```powershell
+   scoop install nssm   # or: choco install nssm
+   ```
+
+2. Install and start the service:
+   ```powershell
+   $WorkerPath = (Get-Command hivemind-worker).Source
+   nssm install HiveMindWorker $WorkerPath "start"
+   nssm set HiveMindWorker AppStdout "$env:USERPROFILE\.hivemind\worker-service.log"
+   nssm set HiveMindWorker AppStderr "$env:USERPROFILE\.hivemind\worker-service.log"
+   nssm start HiveMindWorker
+   ```
+
+3. Manage service anytime:
+   ```powershell
+   nssm status HiveMindWorker
+   nssm restart HiveMindWorker
+   ```
 
 ---
 
