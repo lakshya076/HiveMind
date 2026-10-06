@@ -8,6 +8,7 @@ from rich.prompt import Prompt, Confirm
 
 from hivemind.discovery.scanner import NetworkScanner, DiscoveredDevice
 from hivemind.discovery.prober import SystemProber
+from hivemind.discovery.tailscale import TailscaleScanner
 from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_cluster_path
 from hivemind.runner.dispatch import (
     DispatchError,
@@ -104,59 +105,97 @@ def cli():
 
 @cli.command(name="discover")
 @click.option("--output", "-o", default=None, help="Path to save cluster config (default: ~/.hivemind/cluster.json).")
-def discover_cmd(output: Optional[str]):
-    """Scan local network for devices and interactively configure your HiveMind cluster."""
+@click.option("--local", "-l", "use_local", is_flag=True, default=False, help="Discover devices over local Wi-Fi / Ethernet subnet.")
+@click.option("--tailscale", "-t", "use_tailscale", is_flag=True, default=False, help="Discover devices over Tailscale mesh network.")
+def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
+    """Scan Tailscale mesh network or local subnet for candidate worker machines."""
     target_path = output if output else str(get_default_cluster_path())
-    
-    console.print(Panel.fit(
-        "[bold cyan]HiveMind Network Discovery[/bold cyan]\n"
-        "[dim]Scanning local Wi-Fi / Ethernet subnets to find candidate worker machines...[/dim]",
-        border_style="cyan"
-    ))
 
-    interfaces = NetworkScanner.get_local_interfaces()
-    if not interfaces:
-        console.print("[bold red]Error:[/bold red] No active local network interfaces found.")
-        return
+    ts_available = TailscaleScanner.is_available()
 
-    # If multiple interfaces, let user choose or default to first
-    chosen_iface = interfaces[0]
-    if len(interfaces) > 1:
-        console.print("\n[bold yellow]Multiple network interfaces detected:[/bold yellow]")
-        for i, iface in enumerate(interfaces, 1):
-            console.print(f"  [{i}] {iface['name']} - IP: {iface['ip']} (Subnet: {iface['cidr']})")
-        choice = Prompt.ask("Select interface to scan", default="1")
-        try:
-            chosen_iface = interfaces[int(choice) - 1]
-        except Exception:
-            chosen_iface = interfaces[0]
-
-    console.print(f"\n[bold green]Scanning subnet:[/bold green] {chosen_iface['cidr']} via [cyan]{chosen_iface['name']}[/cyan] ({chosen_iface['ip']})...\n")
+    # Determine discovery mode
+    mode = "tailscale" if use_tailscale else ("local" if use_local else None)
+    if not mode:
+        if ts_available:
+            console.print(Panel.fit(
+                "[bold cyan]HiveMind Discovery[/bold cyan]\n"
+                "[dim]Tailscale mesh network and local network detected.[/dim]",
+                border_style="cyan"
+            ))
+            console.print("[bold yellow]Choose discovery method:[/bold yellow]")
+            console.print("  [1] [bold green]Tailscale Mesh Fleet[/bold green] [dim](instant peer lookup across all locations)[/dim]")
+            console.print("  [2] [bold cyan]Local Network Subnet Scan[/bold cyan] [dim](Wi-Fi / Ethernet subnet sweep)[/dim]")
+            console.print("  [3] [bold magenta]Both[/bold magenta] [dim](combine Tailscale peers and local subnet devices)[/dim]")
+            choice = Prompt.ask("Select discovery method", choices=["1", "2", "3"], default="1")
+            if choice == "1":
+                mode = "tailscale"
+            elif choice == "2":
+                mode = "local"
+            else:
+                mode = "both"
+        else:
+            mode = "local"
 
     discovered: list[DiscoveredDevice] = []
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        console=console
-    ) as progress:
-        scan_task = progress.add_task("Probing local devices...", total=100)
+    source_label = "Local Network"
 
-        def update_progress(current, total):
-            progress.update(scan_task, completed=int((current / total) * 100))
+    # 1. Tailscale Discovery
+    if mode in ("tailscale", "both"):
+        with console.status("[bold green]Querying Tailscale daemon for active peers...[/bold green]"):
+            ts_peers = TailscaleScanner.discover_peers(probe_ssh=True)
+            discovered.extend(ts_peers)
+        source_label = "Tailscale Mesh" if mode == "tailscale" else "Tailscale + Local"
 
-        discovered = NetworkScanner.scan_subnet(
-            chosen_iface["network"],
-            progress_callback=update_progress
-        )
+    # 2. Local Subnet Discovery
+    if mode in ("local", "both"):
+        interfaces = NetworkScanner.get_local_interfaces()
+        if not interfaces:
+            if not discovered:
+                console.print("[bold red]Error:[/bold red] No active local network interfaces found.")
+                return
+        else:
+            chosen_iface = interfaces[0]
+            if len(interfaces) > 1 and mode == "local":
+                console.print("\n[bold yellow]Multiple local network interfaces detected:[/bold yellow]")
+                for i, iface in enumerate(interfaces, 1):
+                    console.print(f"  [{i}] {iface['name']} - IP: {iface['ip']} (Subnet: {iface['cidr']})")
+                choice = Prompt.ask("Select interface to scan", default="1")
+                try:
+                    chosen_iface = interfaces[int(choice) - 1]
+                except Exception:
+                    chosen_iface = interfaces[0]
+
+            console.print(f"\n[bold green]Scanning subnet:[/bold green] {chosen_iface['cidr']} via [cyan]{chosen_iface['name']}[/cyan] ({chosen_iface['ip']})...\n")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                console=console
+            ) as progress:
+                scan_task = progress.add_task("Probing local devices...", total=100)
+
+                def update_progress(current, total):
+                    progress.update(scan_task, completed=int((current / total) * 100))
+
+                local_devs = NetworkScanner.scan_subnet(
+                    chosen_iface["network"],
+                    progress_callback=update_progress
+                )
+                # Deduplicate by IP
+                existing_ips = {d.ip for d in discovered}
+                for ld in local_devs:
+                    if ld.ip not in existing_ips:
+                        discovered.append(ld)
+            source_label = f"Local Subnet ({chosen_iface['cidr']})" if mode == "local" else source_label
 
     if not discovered:
-        console.print("[yellow]No other active devices discovered on the subnet.[/yellow]")
+        console.print("[yellow]No active devices discovered.[/yellow]")
         return
 
     # Display results table
-    table = Table(title=f"Discovered Devices on {chosen_iface['cidr']}", border_style="blue")
+    table = Table(title=f"Discovered Devices ({source_label})", border_style="blue")
     table.add_column("#", justify="right", style="cyan", no_wrap=True)
     table.add_column("IP Address", style="bold white")
     table.add_column("Hostname", style="green")
@@ -165,7 +204,7 @@ def discover_cmd(output: Optional[str]):
 
     for idx, dev in enumerate(discovered, 1):
         ssh_status = "[bold green]OPEN[/bold green]" if dev.ssh_open else "[dim red]CLOSED[/dim red]"
-        device_type = "Master Host" if dev.is_local_host else "Remote Device"
+        device_type = "Master Host" if dev.is_local_host else ("Tailscale Peer" if dev.ip.startswith("100.") else "Remote Device")
         table.add_row(
             str(idx),
             dev.ip,
@@ -178,7 +217,7 @@ def discover_cmd(output: Optional[str]):
 
     # Interactive device selection
     selection_str = Prompt.ask(
-        "[bold yellow]Select device numbers to add to the cluster[/bold yellow] (e.g. '1, 2, 3' or 'all', 'q' to quit)",
+        "[bold yellow]Select device numbers to add to the cluster[/bold yellow] (e.g. '1, 2' or 'all', 'q' to quit)",
         default="all"
     )
 
@@ -188,7 +227,9 @@ def discover_cmd(output: Optional[str]):
 
     selected_devices: list[DiscoveredDevice] = []
     if selection_str.strip().lower() == "all":
-        selected_devices = [d for d in discovered if not d.is_local_host]
+        # Default to selecting remote devices with open SSH ports
+        ssh_ready = [d for d in discovered if not d.is_local_host and d.ssh_open]
+        selected_devices = ssh_ready if ssh_ready else [d for d in discovered if not d.is_local_host]
     else:
         for part in selection_str.split(","):
             part = part.strip()
@@ -206,20 +247,41 @@ def discover_cmd(output: Optional[str]):
     # Build cluster config
     workers: list[WorkerNode] = []
     for i, dev in enumerate(selected_devices, 1):
-        default_id = f"worker-{i}" if dev.hostname == "Unknown" else dev.hostname.split(".")[0].lower()
-        console.print(f"[bold cyan]--- Device #{i} ({dev.ip}) ---[/bold cyan]")
+        default_id = f"worker-{i}" if dev.hostname in ("Unknown", "Master") else dev.hostname.split(".")[0].lower()
+        console.print(f"[bold cyan]--- Device #{i} ({dev.hostname} @ {dev.ip}) ---[/bold cyan]")
         
         worker_id = Prompt.ask("  Worker ID", default=default_id)
-        ssh_user = Prompt.ask("  SSH Username [dim](actual user on target device)[/dim]", default="developer")
+        ssh_user = Prompt.ask("  SSH Username [dim](actual user on target device)[/dim]", default="lakshya" if dev.hostname.lower() == "ari" else "developer")
         ssh_port = int(Prompt.ask("  SSH Port", default="22"))
 
-        # Automatically probe the remote machine for real hardware & tools
-        console.print("  [dim]Probing hardware & installed tools over SSH...[/dim]")
-        detected_tags = SystemProber.probe_remote(dev.ip, user=ssh_user, port=ssh_port, timeout=3.0)
-        default_caps_str = ", ".join(detected_tags)
-        console.print(f"  [bold green]✓ Detected Profile:[/bold green] [cyan]{default_caps_str}[/cyan]")
+        # Skip probing if SSH port 22 is closed
+        detected_tags: list[str] = []
+        if not dev.ssh_open and ssh_port == 22:
+            console.print("  [yellow]⚠ SSH port 22 is closed on this device. Skipping hardware probe.[/yellow]")
+        else:
+            console.print("  [dim]Probing hardware & installed tools over SSH...[/dim]")
+            detected_tags, probe_err = SystemProber.probe_remote_detailed(dev.ip, user=ssh_user, port=ssh_port, timeout=3.5)
+            if detected_tags:
+                default_caps_str = ", ".join(detected_tags)
+                console.print(f"  [bold green]✓ Detected Profile:[/bold green] [cyan]{default_caps_str}[/cyan]")
+            else:
+                err_text = probe_err if probe_err else "Host unreachable or command failed"
+                console.print(f"  [bold red]✗ Probe Failed:[/bold red] [yellow]{err_text}[/yellow]")
+                if "Authentication" in err_text:
+                    console.print(f"  [dim yellow]Tip: Authorize your Master SSH public key (~/.ssh/id_ed25519.pub) on {dev.hostname} for user '{ssh_user}'.[/dim yellow]")
 
-        workspace_dir = Prompt.ask("  Workspace Directory", default="~/workspace/project")
+        default_caps_str = ", ".join(detected_tags)
+        
+        # Suggest workspace directory based on OS
+        is_windows_peer = dev.os_type == "windows" or "os-windows" in detected_tags
+        if is_windows_peer:
+            default_ws = f"C:\\Users\\{ssh_user}\\workspace\\project"
+        elif dev.hostname.lower() == "ari":
+            default_ws = "~/hive-testing"
+        else:
+            default_ws = "~/workspace/project"
+
+        workspace_dir = Prompt.ask("  Workspace Directory", default=default_ws)
         
         # Auto-suggest default engine if detected
         default_engine = "claude-code"
@@ -234,7 +296,10 @@ def discover_cmd(output: Optional[str]):
             default=default_engine
         )
         
-        capabilities_raw = Prompt.ask("  Capabilities tags (comma-separated)", default=default_caps_str)
+        capabilities_raw = Prompt.ask(
+            "  Capabilities tags (comma-separated)",
+            default=default_caps_str if default_caps_str else "standard-cpu"
+        )
         caps = [c.strip() for c in capabilities_raw.split(",") if c.strip()]
 
         workers.append(WorkerNode(
@@ -249,7 +314,7 @@ def discover_cmd(output: Optional[str]):
         console.print()
 
     cluster_config = ClusterConfig(
-        cluster_name="hive-local-fleet",
+        cluster_name="hive-fleet",
         workers=workers
     )
 
@@ -278,140 +343,165 @@ def list_cmd(cluster: Optional[str]):
     table.add_column("User", style="yellow")
     table.add_column("Engine", style="magenta")
     table.add_column("Capabilities", style="blue")
-    table.add_column("Workspace Dir", style="dim")
 
-    for w in config.workers:
+    for worker in config.workers:
+        caps_str = ", ".join(worker.capabilities) if worker.capabilities else "none"
         table.add_row(
-            w.id,
-            f"{w.host}:{w.port}",
-            w.user,
-            w.agent_engine,
-            ", ".join(w.capabilities) if w.capabilities else "none",
-            w.workspace_dir
+            worker.id,
+            f"{worker.host}:{worker.port}",
+            worker.user,
+            worker.agent_engine,
+            caps_str
         )
 
-    console.print("\n", table)
+    console.print()
+    console.print(table)
     if config.repo_url:
-        console.print(f"[dim]Shared origin:[/dim] [white]{config.repo_url}[/white]\n")
+        console.print(f"[dim]Shared origin (repo_url):[/dim] {config.repo_url}")
     else:
-        console.print("[dim]Shared origin: not set (pass --repo on hive dispatch or add repo_url to cluster.json)[/dim]\n")
+        console.print("[dim]No repo_url set in cluster config. Pass --repo on dispatch.[/dim]")
+    console.print()
 
 
 @cli.command(name="check")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file (default: ~/.hivemind/cluster.json).")
 def check_cmd(cluster: Optional[str]):
-    """Test SSH connectivity, Git readiness, and AI CLI tools on all worker nodes."""
-    try:
-        config = ClusterConfig.load(cluster)
-    except FileNotFoundError:
-        default_path = cluster if cluster else get_default_cluster_path()
-        console.print(f"[bold red]Error:[/bold red] Cluster file '{default_path}' not found. Run [bold cyan]hive discover[/bold cyan] first.")
+    """Test SSH connectivity, Git readiness, and AI CLI tools on all configured workers."""
+    config = _load_config(cluster)
+    if config is None:
         return
 
-    console.print(f"\n[bold cyan]Checking connectivity for cluster: [white]{config.cluster_name}[/white]...[/bold cyan]\n")
+    console.print(Panel.fit(
+        f"[bold cyan]Checking HiveMind Cluster:[/bold cyan] {config.cluster_name} ({len(config.workers)} nodes)",
+        border_style="cyan"
+    ))
 
-    table = Table(title="Node Health & Readiness Check", border_style="green")
+    table = Table(title="Cluster Readiness Status", border_style="green")
     table.add_column("Worker ID", style="bold white")
-    table.add_column("Host", style="cyan")
     table.add_column("SSH Reachable", justify="center")
     table.add_column("Git Ready", justify="center")
-    table.add_column("Agent Engine", style="magenta")
-    table.add_column("Status Details", style="dim")
+    table.add_column("Agent Engine", justify="center")
+    table.add_column("Live Hardware / Tools", style="cyan")
 
-    for w in config.workers:
-        ssh_ok = NetworkScanner.check_ssh_port(w.host, port=w.port, timeout=2.5)
-        ssh_status = "[bold green]YES[/bold green]" if ssh_ok else "[bold red]NO[/bold red]"
-        
-        git_status = "[yellow]UNKNOWN[/yellow]"
-        details = "Port 22 Open" if ssh_ok else "Connection Refused / Timeout"
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console
+    ) as progress:
+        task = progress.add_task("Auditing worker nodes...", total=len(config.workers))
 
-        # If SSH is open, attempt a quick SSH command and probe hardware
-        if ssh_ok:
+        for worker in config.workers:
+            progress.update(task, description=f"Auditing [bold cyan]{worker.id}[/bold cyan] ({worker.host})...")
+            
+            # 1. SSH Ping
+            ssh_status = "[bold green]YES[/bold green]"
+            git_status = "[bold green]YES[/bold green]"
+            engine_status = f"[bold green]{worker.agent_engine}[/bold green]"
+
             try:
-                res = ssh_run(w, "git --version", timeout=3, check=False)
-                if res.returncode == 0:
-                    git_status = "[bold green]YES[/bold green]"
-                    live_tags = SystemProber.probe_remote(w.host, user=w.user, port=w.port, timeout=3.0)
-                    details = f"{res.stdout.strip()} | Profile: {', '.join(live_tags)}"
-                else:
-                    git_status = "[bold yellow]AUTH REQUIRED[/bold yellow]"
-                    details = (res.stderr or res.stdout or "SSH key not configured on worker").strip()
-            except SSHError as e:
-                details = str(e)
-            except Exception as e:
-                details = str(e)
+                out = ssh_run(worker, "git --version", timeout=4)
+                if not out or "git version" not in out:
+                    git_status = "[bold yellow]NO (git missing)[/bold yellow]"
+            except SSHError as exc:
+                ssh_status = f"[bold red]FAIL ({exc})[/bold red]"
+                git_status = "[dim red]UNKNOWN[/dim red]"
+                engine_status = "[dim red]UNKNOWN[/dim red]"
 
-        table.add_row(
-            w.id,
-            f"{w.host}:{w.port}",
-            ssh_status,
-            git_status,
-            w.agent_engine,
-            details
-        )
+            # Check Agent Tooling
+            if "FAIL" not in ssh_status:
+                try:
+                    engine_cmd = f"command -v {worker.agent_engine} || which {worker.agent_engine}"
+                    if worker.agent_engine == "claude-code":
+                        engine_cmd = "command -v claude || which claude"
+                    agent_path = ssh_run(worker, engine_cmd, timeout=4).strip()
+                    if not agent_path:
+                        engine_status = f"[bold red]MISSING ({worker.agent_engine})[/bold red]"
+                except SSHError:
+                    engine_status = f"[bold red]MISSING ({worker.agent_engine})[/bold red]"
 
-    console.print(table, "\n")
+            # Real-time hardware & tool probe
+            live_tags = SystemProber.probe_remote(worker.host, user=worker.user, port=worker.port, timeout=4)
+            live_caps_str = ", ".join(live_tags) if live_tags else "[dim]unreachable[/dim]"
+
+            table.add_row(
+                worker.id,
+                ssh_status,
+                git_status,
+                engine_status,
+                live_caps_str
+            )
+            progress.advance(task)
+
+    console.print("\n", table, "\n")
 
 
 @cli.command(name="dispatch")
-@click.argument("prompt_arg", metavar="PROMPT", required=False)
-@click.option("--prompt", "prompt_opt", default=None, help="Task prompt (alternative to the positional argument).")
-@click.option("--repo", "repo_url", default=None, help="Shared git origin. Overrides cluster.json repo_url.")
-@click.option("--workers", "worker_ids", default=None, help="Comma-separated worker ids (default: all).")
-@click.option("--strategy", "strategies", multiple=True, help="Named strategy for a worker. Repeatable.")
-@click.option("--test", "test_command", default=None, help="Remote command to run after the agent exits.")
-@click.option("--bench", "bench_command", default=None, help="Optional remote benchmark command.")
-@click.option("--model", default=None, help="Model id for aider (default: openrouter/openrouter/free).")
+@click.argument("prompt", required=True)
+@click.option("--repo", "repo_url", default=None, help="Git origin URL (default: repo_url from cluster.json).")
+@click.option("--workers", "worker_ids_csv", default=None, help="Comma-separated worker ids to use (default: all).")
+@click.option("--strategy", "strategies", multiple=True, help="Named strategy (repeatable). Default: strategy-1..N.")
+@click.option("--test", "test_command", default=None, help="Command to run after agent finishes (e.g. 'pytest -q').")
+@click.option("--bench", "bench_command", default=None, help="Benchmark command producing a JSON output.")
+@click.option("--model", default=None, help="Model override for the worker engine.")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def dispatch_cmd(
-    prompt_arg: Optional[str],
-    prompt_opt: Optional[str],
+    prompt: str,
     repo_url: Optional[str],
-    worker_ids: Optional[str],
+    worker_ids_csv: Optional[str],
     strategies: tuple[str, ...],
     test_command: Optional[str],
     bench_command: Optional[str],
     model: Optional[str],
     cluster: Optional[str],
 ):
-    """Start a parallel coding job on worker machines. Returns immediately; use hive status to follow it."""
-    prompt = (prompt_arg or prompt_opt or "").strip()
-    if not prompt:
-        console.print("[bold red]Error:[/bold red] A prompt is required. Example: hive dispatch \"Fix add() so check.py passes.\"")
-        return
-
+    """Start a parallel coding job on worker machines."""
     config = _load_config(cluster)
     if config is None:
         return
 
+    worker_ids = [wid.strip() for wid in worker_ids_csv.split(",")] if worker_ids_csv else None
     try:
+        selected = select_workers(config, worker_ids)
+        assigned_strategies = assign_strategies(selected, strategies)
         resolved_repo = resolve_repo_url(config, repo_url)
-        selected = select_workers(
-            config,
-            [part.strip() for part in worker_ids.split(",")] if worker_ids else None,
-        )
-        assigned = assign_strategies(selected, strategies)
-        extra = len(strategies) - len(selected)
-        if extra > 0:
-            console.print(f"[yellow]Ignoring {extra} extra --strategy value(s); one strategy is used per worker.[/yellow]")
-        run = dispatch_run(
-            config,
-            prompt,
-            repo_url=resolved_repo,
-            workers=selected,
-            strategies=assigned,
-            test_command=test_command,
-            bench_command=bench_command,
-            model=model,
-        )
     except DispatchError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         return
 
     console.print(Panel.fit(
-        f"[bold green]Dispatched run[/bold green] [white]{run.run_id}[/white]\n"
+        f"[bold cyan]Dispatching Swarm Job[/bold cyan]\n"
+        f"[white]{prompt}[/white]\n"
+        f"[dim]Origin:[/dim] {resolved_repo}\n"
+        f"[dim]Workers ({len(selected)}):[/dim] {', '.join(w.id for w in selected)}",
+        border_style="cyan",
+    ))
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Starting remote jobs over SSH...", total=len(selected))
+        try:
+            run = dispatch_run(
+                config,
+                prompt,
+                repo_url=resolved_repo,
+                workers=selected,
+                strategies=assigned_strategies,
+                test_command=test_command,
+                bench_command=bench_command,
+                model=model,
+            )
+        except DispatchError as exc:
+            console.print(f"[bold red]Error:[/bold red] {exc}")
+            return
+        progress.advance(task, advance=len(selected))
+
+    console.print(Panel.fit(
+        f"[bold green]Dispatched run {run.run_id}[/bold green]\n"
         f"[dim]Origin:[/dim] {run.repo_url}\n"
-        f"[dim]Follow progress with[/dim] [bold white]hive status[/bold white]",
+        "[dim]Follow progress with[/dim] [bold white]hive status[/bold white]",
         border_style="green",
     ))
     _print_run_table(run)
@@ -421,7 +511,7 @@ def dispatch_cmd(
 @click.option("--run", "run_id", default=None, help="Run id (default: latest).")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def status_cmd(run_id: Optional[str], cluster: Optional[str]):
-    """Show live status of a dispatched run by reading result.json on each worker."""
+    """Show live status of a dispatched run by reading result.json from workers."""
     run = _load_run(run_id)
     if run is None:
         return
@@ -431,19 +521,23 @@ def status_cmd(run_id: Optional[str], cluster: Optional[str]):
         config = ClusterConfig.load(cluster)
     except FileNotFoundError:
         pass
-
     workers_by_id = {w.id: w for w in config.workers} if config else {}
-    run = refresh_run(run, workers_by_id)
-    console.print(
-        f"[bold cyan]Run[/bold cyan] [white]{run.run_id}[/white]  "
-        f"[dim]origin {run.repo_url}[/dim]"
-    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task(f"Polling workers for run {run.run_id}...", total=len(run.workers))
+        run = refresh_run(run, workers_by_id)
+        progress.advance(task, advance=len(run.workers))
+
+    console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {run.repo_url}[/dim]")
     _print_run_table(run)
-    still_running = any(w.status in {"starting", "running", "unknown"} for w in run.workers)
-    if still_running:
-        console.print("[dim]Jobs are still in progress. Re-run hive status to refresh.[/dim]\n")
-    else:
-        console.print("[dim]All workers finished. Review branches, then hive merge.[/dim]\n")
+
+    all_done = all(w.status in {"succeeded", "failed"} for w in run.workers)
+    if all_done and run.workers:
+        console.print("[dim]All workers finished. Review branches, then[/dim] [bold white]hive merge[/bold white].\n")
 
 
 @cli.command(name="merge")

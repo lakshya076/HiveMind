@@ -11,6 +11,9 @@ flowchart LR
     P1["Phase 1: MVP Core Runner
     (Frictionless Swarm CLI)"]
     
+    P1b["Phase 1B: Daemon Transport
+    (No SSH · HTTP · Tailscale)"]
+
     P2["Phase 2: Cost & Hardware Engine
     (Watchdog & Hardware Routing)"]
     
@@ -23,7 +26,7 @@ flowchart LR
     P5["Phase 5: Autonomous Orchestration
     (Master AI Agent, One-Click Deploy)"]
 
-    P1 --> P2 --> P3 --> P4 --> P5
+    P1 --> P1b --> P2 --> P3 --> P4 --> P5
 ```
 
 
@@ -31,7 +34,8 @@ flowchart LR
 
 | Phase                             | Focus Areas                                                                                                | Targeted Gaps                                                 | Primary Outcome                                                        |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| **Phase 1: MVP (**`hive` **CLI)** | Functional `hive` CLI tool (Check, Dispatch, Results table, Merge), Git Branching, SSH/Tailscale execution | **Gap 4** (Ad-Hoc Swarm CLI)                                  | Fully functional `hive` CLI to run multi-machine parallel coding jobs. |
+| **Phase 1A: MVP (`hive` CLI)**    | Functional `hive` CLI tool (Check, Dispatch, Results table, Merge), Git Branching, SSH-based execution     | **Gap 4** (Ad-Hoc Swarm CLI)                                  | Fully functional `hive` CLI to run multi-machine parallel coding jobs. |
+| **Phase 1B: Daemon Transport**    | Replace SSH with `hivemind-worker` HTTP daemon on port 7422, Tailscale fleet discovery, fleet API key auth | **Security** (No raw shell access) & **Cross-OS** (Windows workers) | Zero-SSH execution — master talks to daemon, daemon runs agent locally. |
 | **Phase 2: Optimization**         | Early Stopping Watchdog, Hardware-Aware Routing                                                            | **Gap 3** (Token Costs) & **Gap 5** (Hardware Routing)        | 50%+ token cost reduction & optimal hardware usage.                    |
 | **Phase 3: Intelligence**         | Shared Knowledge Bus, Hybrid Solution Splicing                                                             | **Gap 1** (Siloed Agents) & **Gap 2** (Winner-Take-All Waste) | Cross-worker learning and multi-branch code synthesis.                 |
 | **Phase 4: Polish**               | Interactive TUI Dashboard, Web UI, MicroVM Sandboxing (gVisor/E2B)                                         | Security & Developer Experience                               | Advanced visual UI polish and production sandboxing.                   |
@@ -42,25 +46,29 @@ flowchart LR
 
 
 
-## Phase 1: MVP Core Runner & `hive` CLI (The Foundation)
+## Phase 1A: MVP Core Runner & `hive` CLI (The Foundation)
 
-**Goal:** Build the complete functional `hive` CLI tool (package `hivemind`) on the Master machine to dispatch coding tasks across 2–5 machines, execute them using headless coding agents (Claude Code / `agy`), and report back git branches and benchmark metrics.
+**Goal:** Build the complete functional `hive` CLI tool (package `hivemind`) on the Master machine to dispatch coding tasks across 2–5 machines, execute them using headless coding agents (Claude Code / `agy` / `aider`), and report back git branches and benchmark metrics.
 
 ### Key Deliverables:
 
 - [x] **Core** `hive` **CLI Application (**`hivemind` **package)**:
-  - Built with Python (`typer`/`click` + `rich` console output).
-  - Commands: `hive check`, `hive dispatch`, `hive status`, `hive merge`.
+  - Built with Python (`click` + `rich` console output).
+  - Commands: `hive check`, `hive dispatch`, `hive status`, `hive merge`, `hive discover`, `hive list`.
 - [x] **Cluster Configuration Engine (**`hive check` **&** `hive discover`**)**:
   - Parse global `~/.hivemind/cluster.json` and validate machine connectivity over standard SSH.
   - Automatic hardware probing (`SystemProber`) for CPU cores, RAM, GPU, Docker, and agent CLIs.
 - [x] **Two-Stage Connectivity & Validation Plan**:
-  - **Stage 1A ✅ VALIDATED (Local Network)**: Full dispatch → status → merge cycle confirmed on a real 2-machine LAN cluster.
-    - **Master:** Windows machine running `hive` CLI.
-    - **Worker (`ari`):** Ubuntu machine, passwordless SSH, same LAN (`192.168.x.x`).
-    - **Agent tested:** `aider` with model `openrouter/openrouter/free` — requires `OPENROUTER_API_KEY` exported on the worker (see README).
+  - **Stage 1A ✅ VALIDATED (Local Network / SSH)**: Full dispatch → status → merge cycle confirmed on a real 2-machine LAN cluster.
+    - **Master:** Windows machine (`Artemis`) running `hive` CLI.
+    - **Worker (`ari`):** Ubuntu machine, passwordless SSH, same LAN (`192.168.1.69`).
+    - **Agent tested:** `aider` with model `openrouter/openrouter/free` — requires `OPENROUTER_API_KEY` exported on the worker.
     - **Test fixture:** `add.py` bug → aider patched it → `python3 check.py` passed → branch pushed to GitHub origin → `hive merge` into local `main`.
-  - **Stage 1B (Cloud & Remote Testing):** Same workflow across remote machines / cloud VPSs over NetBird/Headscale mesh or cloud SSH keys. _Not yet started._
+  - **Stage 1B → Superseded by Phase 1B:** Remote Tailscale testing will be done using the new daemon transport instead of raw SSH.
+- [x] **Tailscale Fleet Discovery (`hive discover --tailscale`):**
+  - `TailscaleScanner` queries `tailscale status --json` for instant (<0.1s) peer lookup with OS type and Tailscale IPs.
+  - Discovery mode flags: `--tailscale` / `--local` / interactive menu (auto-detects Tailscale presence).
+  - Probing skips SSH-closed Windows machines and shows a clear actionable error on auth failure.
 - [ ] **Local Directory Configuration (**`hive init`**)**:
   - Support project-level configuration overrides (`./cluster.json` or `.hive/config.json`) alongside the global `~/.hivemind/cluster.json`.
   - Enable per-repository worker selection, custom workspace folder mappings, and project-specific build/test commands.
@@ -68,6 +76,99 @@ flowchart LR
 - [x] **Headless Agent Invocation**: Implement remote wrappers to trigger headless CLI sessions (`claude -p "..."` / `agy -p "..."` / `aider --message "..."`).
 - [x] **Result Aggregation**: Collect stdout/stderr, test pass/fail exit codes, and benchmark JSON outputs back to the Master node.
 - [x] **Interactive Merge Assistant (**`hive merge`**)**: Master CLI displays a clean summary table and prompts the user to inspect diffs and merge the winning branch into `main`.
+
+---
+
+
+
+## Phase 1B: Daemon Transport Layer (No SSH · Secure · Cross-Platform)
+
+**Goal:** Replace the raw SSH shell execution model with a lightweight, purpose-built `hivemind-worker` HTTP daemon running on port `7422` on each worker machine. The master communicates exclusively via HTTP REST calls authenticated with a shared fleet API key — no SSH keys, no shell access, no exposed user accounts.
+
+> **Why:** SSH grants the master a raw shell on the worker's personal user account. On machines owned by different people (e.g. a friend's Windows machine), this is a security risk — the master could read personal files, browser data, credentials, etc. The daemon exposes exactly 4 typed endpoints and nothing else.
+
+### Architecture:
+
+```
+Master (Artemis)                          Worker Daemon (ari / Hermes / any)
+       │                                         │
+       │── POST /dispatch ─────────────────────►│  Receives: prompt, repo, test cmd, model
+       │                                         │
+       │                                         │──► git clone/fetch shared repo
+       │                                         │──► run aider / agy / claude on workspace
+       │                                         │──► git add -A → commit → push exp/* branch
+       │                                         │──► write final status to internal state
+       │                                         │
+       │── GET  /status/<run-id> ───────────────►│  Returns: {status, branch, logs, test_exit}
+       │── GET  /health ─────────────────────────►│  Returns: {os, arch, cpu, ram, engines, version}
+       │── DEL  /cancel/<run-id> ───────────────►│  Kills running agent subprocess
+       │                                         │
+```
+
+### How Probing Works (Replacing SSH Probe):
+
+`hive discover` no longer runs a Python script over SSH. Instead:
+1. Get list of IPs (from Tailscale or local subnet scan).
+2. For each IP, try `GET http://<ip>:7422/health` with the fleet API key (timeout: 1.5s).
+3. Daemon responds with full hardware + tool profile as JSON in `<0.1s`.
+4. No response → daemon not installed → shown as `HiveMind not installed`.
+
+```
+Discovered Peers (Tailscale Mesh)
+──────────────────────────────────────────────────────────────────
+#   IP               Hostname   HiveMind Daemon    OS / Capabilities
+──────────────────────────────────────────────────────────────────
+1   100.101.58.76    ari        ✓ Ready (idle)     linux · aider · agy
+2   100.115.119.6    Hermes     ✗ Not installed    windows (install daemon first)
+3   100.77.177.65    Artemis    — (this machine)
+──────────────────────────────────────────────────────────────────
+```
+
+### Security Model:
+
+| Mechanism | Detail |
+|---|---|
+| **Tailscale Network** | Daemon only listens on `100.x.x.x` virtual IP — invisible to public internet |
+| **Fleet API Key** | Single shared key for the whole fleet, stored in `~/.hivemind/fleet.key`. Every request requires `Authorization: Bearer <key>` |
+| **Workspace Isolation** | Daemon only reads/writes one designated folder (`~/hive-workspace` or `C:\hive-workspace`) |
+| **No Shell Exposure** | 4 typed endpoints only. Master cannot run arbitrary commands or read arbitrary files |
+| **Works on both local & Tailscale** | Daemon listens on all interfaces — master uses local IP (`192.168.x.x`) or Tailscale IP (`100.x.x.x`) transparently |
+| **Stripped Subprocess Environment** | Agent subprocess is launched with a **minimal, explicit env** — only `PATH`, `HOME` (pointed at workspace dir), git vars, and the required API key(s). Personal SSH keys, browser credentials, and all other env vars are excluded. Not a true sandbox, but meaningfully limits credential leakage and `~` expansion. |
+
+> **Note on full sandboxing:** True process sandboxing (Docker, gVisor) is deferred to Phase 4 as an opt-in `--sandbox docker` flag on the daemon. The stripped-env approach is the Phase 1B baseline — safe enough for a trusted fleet, not yet suitable for untrusted third-party workers.
+
+### Worker Installation (Manual, One-Time, No SSH Required):
+
+```bash
+# Worker machine (Linux - ari)
+pip install hivemind-worker
+hivemind-worker start --key <fleet-api-key> --port 7422
+
+# Worker machine (Windows - Hermes)
+pip install hivemind-worker
+hivemind-worker start --key <fleet-api-key> --port 7422
+```
+
+Fleet API key is generated once on the master:
+```powershell
+hive keygen
+# → hive-fleet-key-a1b2c3d4e5f6...
+# → Saved to ~/.hivemind/fleet.key
+```
+
+### Key Deliverables:
+
+- [ ] **`hivemind-worker` Daemon Package** (new standalone Python package):
+  - FastAPI + uvicorn server, cross-platform (Linux & Windows).
+  - 4 endpoints: `POST /dispatch`, `GET /status/<run-id>`, `GET /health`, `DELETE /cancel/<run-id>`.
+  - Runs the AI agent as a local subprocess (identical to `worker.sh` today, but inside Python).
+  - Manages workspace isolation — all git operations confined to `~/hive-workspace`.
+- [ ] **`hive keygen`** — generates and saves the shared fleet API key.
+- [ ] **Updated `remote.py`** — replace SSH upload + nohup with `POST /dispatch` HTTP call.
+- [ ] **Updated `status.py`** — replace SSH `result.json` read with `GET /status/<run-id>` HTTP call.
+- [ ] **Updated `discover/check`** — replace SSH connectivity check with `GET /health` probe.
+- [ ] **Updated `cluster.json` schema** — add `fleet_key` field; remove SSH-specific fields where applicable.
+- [ ] **`hive tui`** daemon mode — show daemon health per worker in the TUI dashboard.
 
 ---
 
@@ -117,9 +218,12 @@ flowchart LR
 
 ### Key Deliverables:
 
-- [ ] **Interactive TUI Dashboard**: Terminal User Interface (built with `textual` or `rich`) displaying real-time streaming agent thoughts, test counters, and hardware utilization per node.
-- [ ] **Container / MicroVM Sandboxing**:
-  - Add optional Docker with **gVisor (**`runsc`**)** or **Daytona / E2B** microVM support on worker nodes to isolate untrusted code execution.
+- [ ] **Interactive TUI Dashboard**: Terminal User Interface (built with `textual` or `rich`) displaying real-time streaming agent thoughts, test counters, and hardware utilization per node. _(Prototype exists on `feature/tui` branch — being developed in parallel.)_
+- [ ] **Container / MicroVM Sandboxing** (`--sandbox` flag, opt-in):
+  - Daemon gains a `--sandbox docker` startup flag. When active, each agent subprocess runs inside a Docker container with only the workspace volume mounted — no host filesystem access.
+  - Advanced option: **gVisor (**`runsc`**)** runtime on Linux for syscall-level isolation (suitable for untrusted third-party workers).
+  - The daemon's subprocess launcher already uses a stripped env (Phase 1B baseline); this upgrades isolation from env-stripping to full container confinement.
+  - **Not required for a trusted personal fleet** — only needed when onboarding unknown workers.
 - [ ] **IDE & Plugin Integration**:
   - Custom slash commands for Antigravity (`/swarm`) and VS Code / Cursor extensions.
 - [ ] **Self-Hosting Web Dashboard (Optional)**: Web-based overview of historical swarm runs, benchmark curves, and token cost analytics.
@@ -133,7 +237,7 @@ flowchart LR
 **Goal:** Wire a master AI agent (Claude Code, `agy`, or any MCP-capable agent) directly to the `hive` CLI so it can autonomously decide when to use distributed computing, dispatch the swarm, evaluate results, and merge the winner — with the human only reviewing the final diff and running `git push`.
 
 > **The target experience:**
-> You type: *“Optimize the query engine to handle >100k req/s.”*
+> You type: *"Optimize the query engine to handle >100k req/s."*
 > The master agent figures out the rest. You get a PR.
 
 ---
@@ -153,7 +257,7 @@ Layer 4 ─ MASTER AI AGENT  (claude code / agy on your machine)
          ▽
 Layer 3 ─ HIVE CLI  (Phase 1–3 deliverables)
          │  hive dispatch / status / merge
-         │  SSH orchestration, git branching harness, result aggregation.
+         │  HTTP daemon orchestration, git branching harness, result aggregation.
          ▽
 Layer 2 ─ WORKER AGENTS  (aider / claude / agy on each machine)
          │  Headless coding sessions on isolated exp/* branches.
@@ -194,7 +298,7 @@ Layer 1 ─ GIT ORIGIN  (GitHub / GitLab / self-hosted)
     - Strategy 1: `"Use SIMD intrinsics for the hot loop in query.c"`
     - Strategy 2: `"Replace the global lock with per-shard actor queues"`
     - Strategy 3: `"Memory-map the index file to eliminate syscall overhead"`
-  - These become the `--strategy` arguments, and each worker’s prompt gets the strategy appended automatically.
+  - These become the `--strategy` arguments, and each worker's prompt gets the strategy appended automatically.
 
 - [ ] **Merge Conflict Guard**:
   - Before presenting the diff to the human, the agent checks for merge conflicts with `git merge --no-commit --no-ff`.
@@ -214,9 +318,9 @@ Layer 1 ─ GIT ORIGIN  (GitHub / GitLab / self-hosted)
 | Give the task | **Human** | Natural language, no flags needed |
 | Decide to dispatch or solve locally | **Master agent** | Autonomous |
 | Decompose into strategies | **Master agent** | Autonomous |
-| SSH, upload, run workers | **`hive` CLI** | Autonomous |
+| HTTP dispatch to daemon workers | **`hive` CLI** | Autonomous |
 | Code the fix | **Worker agents** | Autonomous |
-| Test, commit, push branch | **`worker.sh`** | Autonomous |
+| Test, commit, push branch | **`hivemind-worker` daemon** | Autonomous |
 | Pick winner, merge into local main | **Master agent** | Autonomous |
 | Review diff, run `git push` | **Human** | ← only remaining step |
 
@@ -226,11 +330,12 @@ Layer 1 ─ GIT ORIGIN  (GitHub / GitLab / self-hosted)
 
 This phase builds directly on Phases 1–3. Recommended sequence:
 
-1. **Phase 1 done** → `hive dispatch / status / merge` works (current state ✅)
-2. **Phase 2** → Watchdog prevents runaway costs before giving agents autonomy
-3. **Phase 3** → Knowledge Bus + hybrid synthesizer maximizes output quality
-4. **Phase 5 — MCP server** (can be prototyped now, even before Phase 2/3)
-5. **Phase 5 — System prompt + polling loop** (wire the agent to the tools)
-6. **Phase 5 — Slash command** (`/swarm`) for one-line UX
+1. **Phase 1A done** → `hive dispatch / status / merge` works over SSH (current state ✅)
+2. **Phase 1B** → Replace SSH with daemon transport — validates Tailscale fleet (ari + Hermes)
+3. **Phase 2** → Watchdog prevents runaway costs before giving agents autonomy
+4. **Phase 3** → Knowledge Bus + hybrid synthesizer maximizes output quality
+5. **Phase 5 — MCP server** (can be prototyped after Phase 1B, even before Phase 2/3)
+6. **Phase 5 — System prompt + polling loop** (wire the agent to the tools)
+7. **Phase 5 — Slash command** (`/swarm`) for one-line UX
 
-> **Note:** The MCP server wrapper (step 4) is mostly plumbing and can be prototyped in parallel with Phase 2. The real intelligence — knowing *when* to dispatch and *how* to decompose — comes from the system prompt and improves as Phases 2–3 add more signal (watchdog data, benchmark scores, cross-worker discoveries).
+> **Note:** The MCP server wrapper (step 5) is mostly plumbing and can be prototyped in parallel with Phase 2. The real intelligence — knowing *when* to dispatch and *how* to decompose — comes from the system prompt and improves as Phases 2–3 add more signal (watchdog data, benchmark scores, cross-worker discoveries).

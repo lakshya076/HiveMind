@@ -15,6 +15,7 @@ class DiscoveredDevice:
     is_local_host: bool = False
     mac_address: Optional[str] = None
     response_time_ms: Optional[float] = None
+    os_type: Optional[str] = None
 
 
 class NetworkScanner:
