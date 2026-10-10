@@ -1,4 +1,5 @@
 import secrets
+import sys
 import click
 from typing import Optional
 from rich.console import Console
@@ -40,6 +41,17 @@ def _load_config(cluster: Optional[str]) -> Optional[ClusterConfig]:
             "Run [bold cyan]hive discover[/bold cyan] first."
         )
         return None
+
+
+def _require_fleet_key() -> bool:
+    """Workers always require a fleet key; fail fast instead of sending keyless requests."""
+    if get_fleet_key():
+        return True
+    console.print(
+        "[bold red]Error:[/bold red] No fleet key found in ~/.hivemind/fleet.key or HIVEMIND_FLEET_KEY.\n"
+        "Run [bold cyan]hive keygen[/bold cyan], then [bold white]hivemind-worker key set[/bold white] on each worker."
+    )
+    return False
 
 
 def _load_run(run_id: Optional[str]) -> Optional[RunState]:
@@ -417,6 +429,8 @@ def list_cmd(cluster: Optional[str]):
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file (default: ~/.hivemind/cluster.json).")
 def check_cmd(cluster: Optional[str]):
     """Test HTTP Daemon connectivity, Git readiness, and AI CLI tools on all configured workers."""
+    if not _require_fleet_key():
+        sys.exit(1)
     config = _load_config(cluster)
     if config is None:
         return
@@ -497,6 +511,8 @@ def dispatch_cmd(
     cluster: Optional[str],
 ):
     """Start a parallel coding job on worker machines."""
+    if not _require_fleet_key():
+        sys.exit(1)
     config = _load_config(cluster)
     if config is None:
         return
@@ -554,6 +570,8 @@ def dispatch_cmd(
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def status_cmd(run_id: Optional[str], cluster: Optional[str]):
     """Show live status of a dispatched run by reading result.json from workers."""
+    if not _require_fleet_key():
+        sys.exit(1)
     run = _load_run(run_id)
     if run is None:
         return
@@ -587,6 +605,8 @@ def status_cmd(run_id: Optional[str], cluster: Optional[str]):
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
     """Fetch a winning exp/* branch from origin and merge it into local main."""
+    if not _require_fleet_key():
+        sys.exit(1)
     run = _load_run(run_id)
     if run is None:
         return

@@ -139,10 +139,10 @@ uv tool install -e .    # or: pip install -e .
 
 #### 2. Authorize with your Fleet API Key:
 ```bash
-# Run once with --save to store configuration in ~/.hivemind/worker.json
-hivemind-worker start --key <YOUR_FLEET_KEY> --port 7422 --save
+# Paste the key from `hive keygen` at the hidden prompt (stored in ~/.hivemind/worker.json)
+hivemind-worker key set
 ```
-> FLEET_KEY was generated during `hive keygen` command.
+> FLEET_KEY was generated during `hive keygen` command. If you start a worker without a key, it generates one and prints instructions. Workers never run unauthenticated on the network.
 
 #### 3. Ensure AI Coding Agents & Git are Available:
 Ensure at least one supported AI coding CLI is installed and accessible on the worker:
@@ -272,9 +272,9 @@ To ensure worker nodes are always online and auto-start on system boot:
 
 ### Linux (systemd Service)
 
-1. Save configuration on the worker:
+1. Save configuration on the worker (as the same user the service runs as):
    ```bash
-   hivemind-worker start --key <FLEET_KEY> --port 7422 --save
+   hivemind-worker key set
    ```
 
 2. Create `/etc/systemd/system/hivemind-worker.service`:
@@ -331,8 +331,8 @@ To ensure worker nodes are always online and auto-start on system boot:
 Run in PowerShell as Administrator:
 
 ```powershell
-# 1. Save config with fleet key once
-hivemind-worker start --key <FLEET_KEY> --port 7422 --save
+# 1. Save the fleet key once
+hivemind-worker key set
 
 # 2. Register scheduled task to start silently on login
 $Action = New-ScheduledTaskAction -Execute "hivemind-worker.exe" -Argument "start"
@@ -343,17 +343,26 @@ Register-ScheduledTask -TaskName "HiveMindWorker" -Action $Action -Trigger $Trig
 
 #### Method 3: Windows Service via NSSM (Runs even when logged out)
 
+> [!WARNING]
+> Without `ObjectName`, NSSM runs the service as **LocalSystem**, which uses a different home folder, so it won't find your worker config, API keys or git credentials, and jobs would run with SYSTEM privileges. Run it as your own (or a dedicated) user and pass `--config`.
+
 ```powershell
 # Install NSSM (via scoop or choco)
 scoop install nssm
 
+# Store the fleet key as the account the service will use
+hivemind-worker key set
+
 # Configure service
 $WorkerPath = (Get-Command hivemind-worker).Source
-nssm install HiveMindWorker $WorkerPath "start"
+$Config = "$env:USERPROFILE\.hivemind\worker.json"
+nssm install HiveMindWorker $WorkerPath "--config `"$Config`" start"
+nssm set HiveMindWorker ObjectName ".\$env:USERNAME" "<your-windows-password>"
 nssm set HiveMindWorker AppStdout "$env:USERPROFILE\.hivemind\worker-service.log"
 nssm set HiveMindWorker AppStderr "$env:USERPROFILE\.hivemind\worker-service.log"
 nssm start HiveMindWorker
 ```
+*(For a Microsoft account, use `MicrosoftAccount\you@example.com` as the user name.)*
 
 ---
 
@@ -362,7 +371,9 @@ nssm start HiveMindWorker
 | Mechanism | Detail |
 |---|---|
 | **Restricted REST Endpoints** | Only 4 typed endpoints exposed (`/health`, `/dispatch`, `/status`, `/cancel`). No arbitrary shell execution endpoints. |
-| **Fleet Key Bearer Token** | All requests require `Authorization: Bearer <FLEET_KEY>` authentication. Unauthorized requests are rejected immediately with HTTP 401. |
+| **Fleet Key Bearer Token** | All requests require `Authorization: Bearer <FLEET_KEY>` authentication. Unauthorized requests are rejected immediately with HTTP 401. Workers refuse to run without a key, and `hive` refuses to contact workers without one. |
+| **Private-Network Allowlist** | Workers only accept connections from loopback, private LAN ranges and Tailscale (`100.64.0.0/10`); public internet addresses get HTTP 403 (configurable via `allowed_networks`). |
+| **Browser & DNS-Rebinding Protection** | Workers serve no CORS, reject browser-originated requests (`Origin` / cross-site `Sec-Fetch-Site`), and only accept `Host` values that are IPs, the machine's own names, or its Tailscale MagicDNS name. |
 | **Workspace Isolation** | Task execution is strictly isolated inside designated workspace directories (e.g. `~/hive-workspace/<run_id>`). |
 | **Stripped Subprocess Environment** | Agent subprocesses run with a sanitized environment containing only essential system variables and AI provider keys. Personal credentials and sensitive session tokens are stripped. |
 | **Tailscale Mesh Encryption** | When communicating over Tailscale (`100.x.x.x`), all peer-to-peer traffic is end-to-end encrypted with WireGuard. |

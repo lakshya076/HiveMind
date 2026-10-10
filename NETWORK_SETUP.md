@@ -264,8 +264,9 @@ export GOOGLE_API_KEY="AIzaSy..."
    cd hivemind-worker
    uv tool install -e .   # or: pip install -e .
 
-   # Start once with --save to store key and port configuration
-   hivemind-worker start --key <YOUR_FLEET_KEY> --port 7422 --save
+   # Store the fleet key (hidden prompt), then start
+   hivemind-worker key set
+   hivemind-worker start
    ```
 
 3. Enable persistent auto-start on boot:
@@ -326,7 +327,9 @@ Output should confirm all nodes are **`ONLINE (Ready)`** with **`Git Ready: YES`
 | Symptom | Cause | Solution |
 |---|---|---|
 | **`Daemon not reachable on port 7422`** | Worker daemon is offline or blocked by firewall | 1. Check `systemctl status hivemind-worker` on worker.<br>2. Verify port rule: `sudo ufw allow 7422/tcp` or Windows Firewall rule.<br>3. Check if Tailscale is running on both machines. |
-| **`Auth Failed: Worker rejected Fleet API Key`** | Fleet key on worker does not match master's key | Run `hive keygen` on master, then re-register on worker with `hivemind-worker start --key <KEY> --save`. |
+| **`Auth Failed: Worker rejected Fleet API Key`** | Fleet key on worker does not match master's key | Run `hive keygen` on master, then on the worker run `hivemind-worker key set`, paste the key, and restart the worker. |
+| **`Source address not allowed` (HTTP 403)** | Master connects from an address outside the worker's `allowed_networks` (e.g. a public IP) | Connect over Tailscale or the LAN, or add the master's range to `allowed_networks` in the worker's `worker.json`. |
+| **`Unrecognised Host header` (HTTP 400)** | Master reaches the worker via a DNS name the worker doesn't know | Use the worker's IP, hostname or MagicDNS name, or add the name to `allowed_hosts` in the worker's `worker.json`. |
 | **`No active devices discovered` (Local scan)** | Wi-Fi AP Isolation enabled or wrong network interface | 1. Disable AP Isolation in router settings.<br>2. Run `hive discover --local` and explicitly select your active network interface. |
 | **`Git push failed: could not read Username`** | Worker cannot authenticate with Git remote | 1. Add worker's `~/.ssh/id_ed25519.pub` to GitHub/GitLab SSH keys.<br>2. Run `git config --global url."git@github.com:".insteadOf "https://github.com/"` on worker. |
 | **`No engines detected`** | Agent CLI binary not in PATH | Ensure `aider`, `agy`, or `claude` is installed at `~/.local/bin/` or in system `PATH`. Restart `hivemind-worker` service. |
