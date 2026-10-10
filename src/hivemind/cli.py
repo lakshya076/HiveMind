@@ -1,12 +1,14 @@
 import secrets
 import sys
 import click
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Prompt, Confirm, IntPrompt
 
 from hivemind.discovery.scanner import NetworkScanner, DiscoveredDevice
 from hivemind.discovery.prober import SystemProber
@@ -155,8 +157,13 @@ def keygen_cmd(force: bool):
 @click.option("--output", "-o", default=None, help="Path to save cluster config (default: ~/.hivemind/cluster.json).")
 @click.option("--local", "-l", "use_local", is_flag=True, default=False, help="Discover devices over local Wi-Fi / Ethernet subnet.")
 @click.option("--tailscale", "-t", "use_tailscale", is_flag=True, default=False, help="Discover devices over Tailscale mesh network.")
-def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
-    """Scan Tailscale mesh network or local subnet for candidate worker machines."""
+@click.option("--port", "-p", "daemon_port", default=7422, type=int, show_default=True, help="Worker daemon port to probe.")
+def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, daemon_port: int):
+    """Scan Tailscale mesh network or local subnet for candidate worker machines.
+
+    Devices are probed without credentials; the fleet key is only sent to the
+    devices you select.
+    """
     target_path = output if output else str(get_default_cluster_path())
 
     ts_available = TailscaleScanner.is_available()
@@ -242,27 +249,32 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
         console.print("[yellow]No active devices discovered.[/yellow]")
         return
 
-    # Probe daemons on all discovered devices in parallel / fast
-    device_health_map = {}
+    # Detect worker daemons WITHOUT credentials (in parallel). The fleet key is only
+    # sent later, to devices the user explicitly selects.
+    presence_map: dict[str, tuple] = {}
+    remote_devices = [d for d in discovered if not d.is_local_host]
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Probing HiveMind worker daemons (port 7422)...", total=len(discovered))
-        for dev in discovered:
-            if not dev.is_local_host:
-                h_data, tags, err = SystemProber.probe_daemon(dev.ip, port=7422, timeout=1.8)
-                device_health_map[dev.ip] = (h_data, tags, err)
-            progress.advance(task)
+        task = progress.add_task(f"Looking for HiveMind worker daemons (port {daemon_port})...", total=len(remote_devices))
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(remote_devices)))) as pool:
+            futures = {
+                pool.submit(SystemProber.probe_presence, dev.ip, daemon_port): dev.ip
+                for dev in remote_devices
+            }
+            for future in as_completed(futures):
+                presence_map[futures[future]] = future.result()
+                progress.advance(task)
 
     # Display results table
     table = Table(title=f"Discovered Devices ({source_label})", border_style="blue")
     table.add_column("#", justify="right", style="cyan", no_wrap=True)
     table.add_column("IP Address", style="bold white")
     table.add_column("Hostname", style="green")
-    table.add_column("Worker Daemon (Port 7422)", justify="center")
-    table.add_column("OS / AI Engines", style="cyan")
+    table.add_column(f"Worker Daemon (Port {daemon_port})", justify="center")
+    table.add_column("OS", style="cyan")
     table.add_column("Type", style="dim")
 
     for idx, dev in enumerate(discovered, 1):
@@ -271,26 +283,25 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
             profile_str = "Master Node"
             device_type = "Master Host"
         else:
-            h_data, tags, err = device_health_map.get(dev.ip, (None, [], None))
-            if h_data:
-                daemon_status = f"[bold green]READY ({h_data.get('status', 'idle')})[/bold green]"
-                engines = ", ".join(h_data.get("engines", [])) or "no engines detected"
-                profile_str = f"{h_data.get('os', 'os')} - {engines}"
+            info, err = presence_map.get(dev.ip, (None, None))
+            if info:
+                daemon_status = f"[bold green]DETECTED (v{escape(str(info.get('version', '?')))})[/bold green]"
             else:
                 daemon_status = "[dim red]NOT INSTALLED / OFFLINE[/dim red]"
-                profile_str = f"[dim]{dev.os_type or 'unknown'}[/dim]"
+            profile_str = f"[dim]{escape(dev.os_type or 'unknown')}[/dim]"
             device_type = "Tailscale Peer" if dev.ip.startswith("100.") else "Local Machine"
 
         table.add_row(
             str(idx),
             dev.ip,
-            dev.hostname,
+            escape(dev.hostname),
             daemon_status,
             profile_str,
             device_type
         )
 
     console.print("\n", table, "\n")
+    console.print("[dim]Devices were probed without credentials. The fleet key is only sent to the devices you select.[/dim]\n")
 
     # Interactive device selection
     selection_str = Prompt.ask(
@@ -305,7 +316,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
     selected_devices: list[DiscoveredDevice] = []
     if selection_str.strip().lower() == "all":
         # Default to selecting remote devices with active worker daemons
-        ready = [d for d in discovered if not d.is_local_host and device_health_map.get(d.ip, (None, [], None))[0] is not None]
+        ready = [d for d in discovered if not d.is_local_host and presence_map.get(d.ip, (None, None))[0] is not None]
         selected_devices = ready if ready else [d for d in discovered if not d.is_local_host]
     else:
         for part in selection_str.split(","):
@@ -321,26 +332,34 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool):
 
     console.print(f"\n[bold green]Configuring {len(selected_devices)} worker node(s):[/bold green]\n")
 
+    has_key = bool(get_fleet_key())
+    if not has_key:
+        console.print(
+            "[yellow]No fleet key found, so worker capabilities can't be read. "
+            "Run [bold cyan]hive keygen[/bold cyan] first for auto-detected engines and hardware.[/yellow]\n"
+        )
+
     # Build cluster config
     workers: list[WorkerNode] = []
     for i, dev in enumerate(selected_devices, 1):
         default_id = f"worker-{i}" if dev.hostname in ("Unknown", "Master") else dev.hostname.split(".")[0].lower()
-        console.print(f"[bold cyan]--- Device #{i} ({dev.hostname} @ {dev.ip}) ---[/bold cyan]")
-        
-        worker_id = Prompt.ask("  Worker ID", default=default_id)
-        worker_port = int(Prompt.ask("  Daemon Port", default="7422"))
+        console.print(f"[bold cyan]--- Device #{i} ({escape(dev.hostname)} @ {dev.ip}) ---[/bold cyan]")
 
-        h_data, detected_tags, probe_err = device_health_map.get(dev.ip, (None, [], None))
-        if not h_data:
-            # Try on-the-spot probe if port was customized
+        worker_id = Prompt.ask("  Worker ID", default=default_id)
+        worker_port = IntPrompt.ask("  Daemon Port", default=daemon_port)
+
+        # Authenticated probe: only devices the user selected ever receive the fleet key.
+        if has_key:
             h_data, detected_tags, probe_err = SystemProber.probe_daemon(dev.ip, port=worker_port)
+        else:
+            h_data, detected_tags, probe_err = None, [], "No fleet key configured on this machine"
 
         if h_data:
             default_caps_str = ", ".join(detected_tags)
-            console.print(f"  [bold green][OK] Worker Daemon Active:[/bold green] [cyan]{default_caps_str}[/cyan]")
+            console.print(f"  [bold green][OK] Worker Daemon Active:[/bold green] [cyan]{escape(default_caps_str)}[/cyan]")
         else:
             default_caps_str = ""
-            console.print(f"  [yellow][!] Daemon Probe Warning:[/yellow] [dim]{probe_err or 'No response on port ' + str(worker_port)}[/dim]")
+            console.print(f"  [yellow][!] Daemon Probe Warning:[/yellow] [dim]{escape(probe_err or 'No response on port ' + str(worker_port))}[/dim]")
 
         # Suggest workspace directory based on OS
         is_windows_peer = dev.os_type == "windows" or "os-windows" in detected_tags
