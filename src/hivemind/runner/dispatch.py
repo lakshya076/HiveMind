@@ -60,7 +60,11 @@ def resolve_repo_url(config: ClusterConfig, repo_override: Optional[str]) -> str
         )
     if repo_url.startswith("-"):
         raise DispatchError(f"Invalid repo URL {repo_url!r}: cannot start with '-'.")
+    if repo_url.startswith(("\\\\", "//")):
+        raise DispatchError(f"Invalid repo URL {repo_url!r}: UNC network share paths are not allowed.")
     lower = repo_url.lower()
+    if lower.startswith(("file:////", "file://\\\\")):
+        raise DispatchError(f"Invalid repo URL {repo_url!r}: UNC file URLs are not allowed.")
     if lower.startswith(("ext::", "fd::")) or "::" in lower.split("://", 1)[0]:
         raise DispatchError(f"Invalid repo URL {repo_url!r}: forbidden git remote helper protocol.")
     if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in repo_url):

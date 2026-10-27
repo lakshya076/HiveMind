@@ -112,3 +112,11 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 59. `NetworkScanner.probe_host()` and `scan_subnet()` probe the configured worker `daemon_port` (default `7422`) instead of SSH port `22`, so workers without an SSH server are found on LAN scans.
 60. `NetworkScanner._candidate_hosts()` caps oversized subnets (>1,024 addresses, such as `/16` VPN or Docker networks) to the `/24` slice around the interface IP plus known ARP entries in the subnet.
 61. Added A16 + P8 unit and integration tests in `tests/test_accuracy_perf.py` (total master suite: 22 passed).
+
+---
+
+## Round 6: deep security audit fixes (High severity)
+
+### V1: Reject UNC network share `repo_url` values on master
+62. `resolve_repo_url()` (`runner/dispatch.py`) rejects UNC network share paths (`\\server\share`, `//server/share`, `file:////...`) before dispatching to workers.
+63. Added `test_v1_master_rejects_unc_repo_urls` in `tests/test_accuracy_perf.py`.
