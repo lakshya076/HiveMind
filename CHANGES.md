@@ -94,3 +94,13 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 49. `resolve_repo_url()` (`runner/dispatch.py`) rejects `repo_url` values starting with `-`, using git remote helper protocols (`ext::`, `fd::`), or containing whitespace/control characters before any worker is contacted.
 50. New `validate_branch_ref()` (`runner/dispatch.py`) validates branch names before `hive merge` (`cli.py`) passes them to `git fetch` or `git merge`, preventing a rogue worker response from injecting git options on the master.
 51. Added S2 tests in `tests/test_accuracy_perf.py` (total master suite: 20 passed).
+
+---
+
+## Round 5: medium-severity accuracy, performance, and security upgrades
+
+### A13: `hive merge` working-tree safety and default branch detection
+52. New `local_working_tree_dirty()` (`runner/status.py`) checks `git status --porcelain --untracked-files=no`, and `hive merge` (`cli.py`) refuses to run when tracked files have uncommitted edits.
+53. `local_base_branch()` (`runner/status.py`) checks `refs/remotes/origin/HEAD` first, then `main` and `master`, and then the currently checked-out non-`exp/` branch so repositories using `develop` or `trunk` merge cleanly.
+54. `hive merge` previews commits and diff statistics against the local target branch (`<base>..origin/<branch>`) when `<base>` exists locally, matching the branch `git merge` actually merges into.
+55. Added A13 end-to-end test in `tests/test_accuracy_perf.py`.

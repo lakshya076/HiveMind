@@ -30,6 +30,7 @@ from hivemind.runner.status import (
     local_base_branch,
     local_git,
     local_repo_origin,
+    local_working_tree_dirty,
     normalize_git_url,
     refresh_run,
 )
@@ -748,6 +749,13 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
         )
         return
 
+    if local_working_tree_dirty():
+        console.print(
+            "[bold red]Error:[/bold red] Local working tree has uncommitted changes. "
+            "Commit or stash them before running [bold white]hive merge[/bold white]."
+        )
+        return
+
     try:
         local_git(
             "fetch",
@@ -755,15 +763,19 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
             f"+refs/heads/{winner.branch}:refs/remotes/origin/{winner.branch}",
         )
         base = local_base_branch()
-        log = local_git("log", "--oneline", f"origin/{base}..origin/{winner.branch}", check=False)
-        diff = local_git("diff", "--stat", f"origin/{base}...origin/{winner.branch}", check=False)
+        has_local_base = (
+            local_git("show-ref", "--verify", "--quiet", f"refs/heads/{base}", check=False).returncode == 0
+        )
+        compare_base = base if has_local_base else f"origin/{base}"
+        log = local_git("log", "--oneline", f"{compare_base}..origin/{winner.branch}", check=False)
+        diff = local_git("diff", "--stat", f"{compare_base}...origin/{winner.branch}", check=False)
     except RuntimeError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         return
 
     console.print(Panel(
         (log.stdout or "[dim]no commits on branch[/dim]") + "\n" + (diff.stdout or ""),
-        title=f"origin/{winner.branch} vs origin/{base}",
+        title=f"origin/{winner.branch} vs {compare_base}",
         border_style="blue",
     ))
 
@@ -772,7 +784,10 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
         return
 
     try:
-        local_git("checkout", base)
+        if has_local_base:
+            local_git("checkout", base)
+        else:
+            local_git("checkout", "-B", base, f"origin/{base}")
         local_git("merge", "--no-ff", f"origin/{winner.branch}", "-m", f"hive: merge {winner.branch} from {run.run_id}")
     except RuntimeError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")

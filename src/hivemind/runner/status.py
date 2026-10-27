@@ -98,7 +98,19 @@ def local_repo_origin() -> Optional[str]:
     return result.stdout.strip() or None
 
 
+def local_working_tree_dirty() -> bool:
+    result = local_git("status", "--porcelain", "--untracked-files=no", check=False)
+    return bool(result.stdout.strip())
+
+
 def local_base_branch() -> str:
+    sym = local_git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", check=False)
+    if sym.returncode == 0 and sym.stdout.strip():
+        ref = sym.stdout.strip()
+        prefix = "refs/remotes/origin/"
+        if ref.startswith(prefix) and ref[len(prefix):]:
+            return ref[len(prefix):]
+
     for name in ("main", "master"):
         exists = local_git("show-ref", "--verify", "--quiet", f"refs/heads/{name}", check=False)
         if exists.returncode == 0:
@@ -106,6 +118,13 @@ def local_base_branch() -> str:
         remote = local_git("show-ref", "--verify", "--quiet", f"refs/remotes/origin/{name}", check=False)
         if remote.returncode == 0:
             return name
+
+    head = local_git("symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if head.returncode == 0 and head.stdout.strip():
+        cur = head.stdout.strip()
+        if not cur.startswith("exp/"):
+            return cur
+
     raise RuntimeError("Local repo has neither main nor master.")
 
 
