@@ -1,13 +1,31 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 from typing import Optional, Sequence
 
 from hivemind.config.cluster import ClusterConfig, WorkerNode
 from hivemind.runner.remote import start_worker_job
 from hivemind.runner.state import RunState, WorkerRunState, new_run_id
 
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
+
 
 class DispatchError(ValueError):
     pass
+
+
+def validate_branch_ref(branch: str) -> str:
+    cleaned = (branch or "").strip()
+    if (
+        not cleaned
+        or cleaned.startswith("-")
+        or cleaned.endswith(("/", ".lock", "."))
+        or ".." in cleaned
+        or "//" in cleaned
+        or "@{" in cleaned
+        or not _BRANCH_RE.match(cleaned)
+    ):
+        raise DispatchError(f"Invalid branch name {branch!r}")
+    return cleaned
 
 
 def select_workers(config: ClusterConfig, worker_ids: Optional[Sequence[str]]) -> list[WorkerNode]:
@@ -40,6 +58,13 @@ def resolve_repo_url(config: ClusterConfig, repo_override: Optional[str]) -> str
         raise DispatchError(
             "No git origin configured. Set repo_url in cluster.json or pass --repo."
         )
+    if repo_url.startswith("-"):
+        raise DispatchError(f"Invalid repo URL {repo_url!r}: cannot start with '-'.")
+    lower = repo_url.lower()
+    if lower.startswith(("ext::", "fd::")) or "::" in lower.split("://", 1)[0]:
+        raise DispatchError(f"Invalid repo URL {repo_url!r}: forbidden git remote helper protocol.")
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in repo_url):
+        raise DispatchError(f"Invalid repo URL {repo_url!r}: whitespace and control characters are not allowed.")
     return repo_url
 
 

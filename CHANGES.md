@@ -85,3 +85,12 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 ### Testing (local, not committed)
 47. Added 5 tests in `tests/test_accuracy_perf.py` covering run-scoped branch names, benchmark result rendering and terminal status handling in `hive status`, `hive discover` config merging (`repo_url` and existing workers preserved), parallel worker polling in `hive check` and `refresh_run()`, and `hive merge` filtering of unpushed/`no_changes` workers.
 48. Total master suite: 19 passed.
+
+---
+
+## Round 4: remaining high-severity security fixes
+
+### S2: Git option and remote-helper injection via `repo_url` and `branch`
+49. `resolve_repo_url()` (`runner/dispatch.py`) rejects `repo_url` values starting with `-`, using git remote helper protocols (`ext::`, `fd::`), or containing whitespace/control characters before any worker is contacted.
+50. New `validate_branch_ref()` (`runner/dispatch.py`) validates branch names before `hive merge` (`cli.py`) passes them to `git fetch` or `git merge`, preventing a rogue worker response from injecting git options on the master.
+51. Added S2 tests in `tests/test_accuracy_perf.py` (total master suite: 20 passed).

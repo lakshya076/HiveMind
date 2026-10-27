@@ -22,6 +22,7 @@ from hivemind.runner.dispatch import (
     dispatch_run,
     resolve_repo_url,
     select_workers,
+    validate_branch_ref,
 )
 from hivemind.runner.state import RunState, WorkerRunState
 from hivemind.runner.status import (
@@ -724,6 +725,12 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
     winner = next((w for w in finished if w.worker_id == choice), None)
     if winner is None:
         console.print(f"[bold red]Error:[/bold red] Unknown worker '{choice}'.")
+        return
+
+    try:
+        validate_branch_ref(winner.branch)
+    except DispatchError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
         return
 
     origin = local_repo_origin()
