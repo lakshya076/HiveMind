@@ -124,8 +124,8 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 ### V4: Confinement and path-traversal validation for `run_id` on master
 64. New `validate_run_id()` and `_run_file_for()` (`runner/state.py`) enforce `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, reject `..`, and verify that `RunState.path` and `RunState.load()` stay strictly inside `~/.hivemind/runs/`.
 65. `read_worker_result()` (`runner/remote.py`) validates `run_id` before constructing `http://<host>:<port>/status/<run_id>` so a poisoned `remote_run_dir` or `run_id` cannot inject path traversal into worker status requests.
-127. `_load_run()` (`cli.py`) handles invalid `run_id` values cleanly in `hive status` and `hive merge`.
-128. Added `test_v4_master_run_state_and_status_reject_path_traversal_run_ids` in `tests/test_accuracy_perf.py` (total master suite: 24 passed).
+66. `_load_run()` (`cli.py`) handles invalid `run_id` values cleanly in `hive status` and `hive merge`.
+67. Added `test_v4_master_run_state_and_status_reject_path_traversal_run_ids` in `tests/test_accuracy_perf.py` (total master suite: 24 passed).
 
 ---
 
@@ -136,3 +136,8 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 69. New `validate_worker_host()` (`config/cluster.py`) verifies that `WorkerNode.host` is a valid IPv4/IPv6 literal or DNS hostname and rejects URL authority/path injection characters (`/`, `\`, `?`, `#`, `@`, whitespace, control chars, `..`).
 70. `WorkerNode.port` is bounded to `1..65535` and `WorkerNode.id` to `1..128` characters.
 71. Added `test_v6_cluster_config_ignores_untrusted_cwd_fallback_and_validates_worker_host_and_port` in `tests/test_accuracy_perf.py`.
+
+### V7: Enforce `exp/` branch namespace on worker responses and `hive merge`
+72. `validate_branch_ref()` (`runner/dispatch.py`) requires worker branches to reside under the `exp/` namespace (`cleaned.startswith("exp/")`), rejecting non-experiment branches such as `main`, `master`, or `develop`.
+73. `refresh_run()` (`runner/status.py`) validates `payload["branch"]` through `validate_branch_ref()` before updating `worker_state.branch`, preventing a rogue worker from overwriting `worker_state.branch` with `main`.
+74. Added `test_v7_refresh_run_and_merge_reject_non_exp_branches_like_main` in `tests/test_accuracy_perf.py` (total master suite: 26 passed).

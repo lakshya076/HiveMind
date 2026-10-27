@@ -3,6 +3,7 @@ import subprocess
 from typing import Optional
 
 from hivemind.config.cluster import WorkerNode
+from hivemind.runner.dispatch import DispatchError, validate_branch_ref
 from hivemind.runner.remote import read_worker_result
 from hivemind.runner.state import RunState, WorkerRunState
 
@@ -58,7 +59,12 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
         if payload:
             worker_state.status = str(payload.get("status") or status)
             worker_state.error = payload.get("error") or None
-            worker_state.branch = payload.get("branch") or worker_state.branch
+            reported_branch = payload.get("branch")
+            if isinstance(reported_branch, str) and reported_branch.strip():
+                try:
+                    worker_state.branch = validate_branch_ref(reported_branch)
+                except DispatchError:
+                    pass
             worker_state.pushed = payload.get("pushed")
             worker_state.commit = payload.get("commit")
             worker_state.test_exit_code = payload.get("test_exit_code")

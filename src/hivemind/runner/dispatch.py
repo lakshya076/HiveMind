@@ -17,6 +17,8 @@ def validate_branch_ref(branch: str) -> str:
     cleaned = (branch or "").strip()
     if (
         not cleaned
+        or not cleaned.startswith("exp/")
+        or len(cleaned) <= 4
         or cleaned.startswith("-")
         or cleaned.endswith(("/", ".lock", "."))
         or ".." in cleaned
@@ -24,7 +26,9 @@ def validate_branch_ref(branch: str) -> str:
         or "@{" in cleaned
         or not _BRANCH_RE.match(cleaned)
     ):
-        raise DispatchError(f"Invalid branch name {branch!r}")
+        raise DispatchError(
+            f"Invalid branch name {branch!r}: worker branches must be valid refs under 'exp/'."
+        )
     return cleaned
 
 
