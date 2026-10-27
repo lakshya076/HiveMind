@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -36,9 +36,13 @@ class WorkerRunState(BaseModel):
     branch: str
     remote_run_dir: str = ""
     status: str = "starting"
+    pushed: Optional[bool] = None
+    commit: Optional[str] = None
     error: Optional[str] = None
     test_exit_code: Optional[int] = None
     agent_exit_code: Optional[int] = None
+    bench_exit_code: Optional[int] = None
+    benchmark_data: Optional[Any] = None
     benchmark_path: Optional[str] = None
     log_tail: Optional[str] = None
 

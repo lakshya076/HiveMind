@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import secrets
 import sys
 import click
@@ -21,8 +23,9 @@ from hivemind.runner.dispatch import (
     resolve_repo_url,
     select_workers,
 )
-from hivemind.runner.state import RunState
+from hivemind.runner.state import RunState, WorkerRunState
 from hivemind.runner.status import (
+    TERMINAL_STATUSES,
     local_base_branch,
     local_git,
     local_repo_origin,
@@ -68,14 +71,58 @@ def _status_style(status: str) -> str:
     mapping = {
         "succeeded": "[bold green]succeeded[/bold green]",
         "failed": "[bold red]failed[/bold red]",
+        "no_changes": "[yellow]no_changes[/yellow]",
+        "cancelled": "[dim yellow]cancelled[/dim yellow]",
         "running": "[bold yellow]running[/bold yellow]",
         "starting": "[yellow]starting[/yellow]",
         "unknown": "[dim]unknown[/dim]",
     }
-    return mapping.get(status, status)
+    return mapping.get(status, escape(status))
+
+
+def _format_benchmark(worker: WorkerRunState) -> str:
+    data = worker.benchmark_data
+    if data is not None:
+        if isinstance(data, dict):
+            if set(data.keys()) == {"raw_output"}:
+                text = str(data.get("raw_output") or "").strip()
+            else:
+                text = ", ".join(f"{k}={v}" for k, v in data.items())
+        else:
+            text = json.dumps(data)
+        text = text.encode("ascii", errors="ignore").decode("ascii").replace("\n", " ").strip()
+        if len(text) > 80:
+            text = text[:77] + "..."
+        return escape(text) if text else "[dim]-[/dim]"
+    if worker.benchmark_path:
+        return escape(str(worker.benchmark_path))
+    if worker.bench_exit_code is not None:
+        if worker.bench_exit_code == 0:
+            return "[green]ok[/green]"
+        return f"[bold red]fail ({worker.bench_exit_code})[/bold red]"
+    return "[dim]-[/dim]"
+
+
+def _merge_workers(existing: list[WorkerNode], updated: list[WorkerNode]) -> list[WorkerNode]:
+    """Merge newly configured workers into an existing worker list without losing unselected ones."""
+    merged = list(existing)
+    for new_w in updated:
+        replaced = False
+        for idx, old_w in enumerate(merged):
+            if old_w.id == new_w.id or (old_w.host == new_w.host and old_w.port == new_w.port):
+                merged[idx] = new_w
+                replaced = True
+                break
+        if not replaced:
+            merged.append(new_w)
+    return merged
 
 
 def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
+    show_bench = bool(run.bench_command) or any(
+        w.benchmark_data is not None or w.bench_exit_code is not None or w.benchmark_path
+        for w in run.workers
+    )
     table = Table(
         title=title or f"Run {run.run_id}",
         border_style="cyan",
@@ -85,6 +132,8 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     table.add_column("Branch", style="green")
     table.add_column("Status", justify="center")
     table.add_column("Tests", justify="center")
+    if show_bench:
+        table.add_column("Benchmark", justify="center", style="cyan")
     table.add_column("Details", style="dim")
 
     for worker in run.workers:
@@ -100,14 +149,17 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
         # Strip non-ASCII characters (e.g. aider token count symbols) to avoid
         # UnicodeEncodeError on Windows cp1252 consoles
         details = details.encode("ascii", errors="ignore").decode("ascii")
-        table.add_row(
-            worker.worker_id,
-            worker.strategy,
-            worker.branch or "-",
+        row = [
+            escape(worker.worker_id),
+            escape(worker.strategy),
+            escape(worker.branch or "-"),
             _status_style(worker.status),
             tests,
-            details.replace("\n", " "),
-        )
+        ]
+        if show_bench:
+            row.append(_format_benchmark(worker))
+        row.append(escape(details.replace("\n", " ")))
+        table.add_row(*row)
     console.print()
     console.print(table)
     console.print()
@@ -164,7 +216,13 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
     Devices are probed without credentials; the fleet key is only sent to the
     devices you select.
     """
-    target_path = output if output else str(get_default_cluster_path())
+    target_path = Path(output) if output else get_default_cluster_path()
+    existing_config: Optional[ClusterConfig] = None
+    if target_path.exists():
+        try:
+            existing_config = ClusterConfig.load(target_path)
+        except Exception:
+            existing_config = None
 
     ts_available = TailscaleScanner.is_available()
 
@@ -369,7 +427,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
             default_ws = "~/hive-workspace"
 
         workspace_dir = Prompt.ask("  Workspace Directory", default=default_ws)
-        
+
         # Auto-suggest default engine if detected
         default_engine = "aider" if "engine:aider" in detected_tags else ("agy" if "engine:agy" in detected_tags else "claude-code")
         agent_engine = Prompt.ask(
@@ -377,7 +435,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
             choices=["claude-code", "agy", "aider", "custom"],
             default=default_engine
         )
-        
+
         capabilities_raw = Prompt.ask(
             "  Capabilities tags (comma-separated)",
             default=default_caps_str if default_caps_str else "standard-cpu"
@@ -395,8 +453,9 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
         console.print()
 
     cluster_config = ClusterConfig(
-        cluster_name="hive-fleet",
-        workers=workers
+        cluster_name=existing_config.cluster_name if existing_config else "hive-fleet",
+        repo_url=existing_config.repo_url if existing_config else None,
+        workers=_merge_workers(existing_config.workers, workers) if existing_config else workers,
     )
 
     saved_path = cluster_config.save(output)
@@ -466,48 +525,58 @@ def check_cmd(cluster: Optional[str]):
     table.add_column("Agent Engine", justify="center")
     table.add_column("Live Hardware / Tools", style="cyan")
 
+    probe_results: list[Optional[tuple]] = [None] * len(config.workers)
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console
     ) as progress:
         task = progress.add_task("Auditing worker nodes...", total=len(config.workers))
+        if config.workers:
+            with ThreadPoolExecutor(max_workers=min(32, max(1, len(config.workers)))) as pool:
+                futures = {
+                    pool.submit(SystemProber.probe_daemon, worker.host, worker.port, 3.5): idx
+                    for idx, worker in enumerate(config.workers)
+                }
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        probe_results[idx] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        probe_results[idx] = (None, [], str(exc))
+                    progress.advance(task)
 
-        for worker in config.workers:
-            progress.update(task, description=f"Auditing [bold cyan]{worker.id}[/bold cyan] ({worker.host}:{worker.port})...")
-            
-            h_data, tags, err = SystemProber.probe_daemon(worker.host, port=worker.port, timeout=3.5)
+    for idx, worker in enumerate(config.workers):
+        h_data, tags, err = probe_results[idx] or (None, [], "refused")
 
-            if h_data:
-                daemon_status = "[bold green]ONLINE (Ready)[/bold green]" if h_data.get("status") == "ready" else "[bold yellow]BUSY[/bold yellow]"
-                git_status = "[bold green]YES[/bold green]" if h_data.get("git_ready") else "[bold red]NO (missing)[/bold red]"
-                
-                engines = h_data.get("engines", [])
-                if worker.agent_engine in engines:
-                    engine_status = f"[bold green]{worker.agent_engine}[/bold green]"
-                elif engines:
-                    engine_status = f"[yellow]{worker.agent_engine} (avail: {', '.join(engines)})[/yellow]"
-                else:
-                    engine_status = f"[bold red]MISSING ({worker.agent_engine})[/bold red]"
+        if h_data:
+            daemon_status = "[bold green]ONLINE (Ready)[/bold green]" if h_data.get("status") == "ready" else "[bold yellow]BUSY[/bold yellow]"
+            git_status = "[bold green]YES[/bold green]" if h_data.get("git_ready") else "[bold red]NO (missing)[/bold red]"
 
-                live_caps_str = ", ".join(tags) if tags else "[dim]none[/dim]"
+            engines = h_data.get("engines", [])
+            if worker.agent_engine in engines:
+                engine_status = f"[bold green]{escape(worker.agent_engine)}[/bold green]"
+            elif engines:
+                engine_status = f"[yellow]{escape(worker.agent_engine)} (avail: {escape(', '.join(engines))})[/yellow]"
             else:
-                daemon_status = f"[bold red]OFFLINE ({err or 'refused'})[/bold red]"
-                git_status = "[dim red]UNKNOWN[/dim red]"
-                engine_status = "[dim red]UNKNOWN[/dim red]"
-                live_caps_str = "[dim red]unreachable[/dim red]"
+                engine_status = f"[bold red]MISSING ({escape(worker.agent_engine)})[/bold red]"
 
-            table.add_row(
-                worker.id,
-                daemon_status,
-                git_status,
-                engine_status,
-                live_caps_str
-            )
-            progress.advance(task)
+            live_caps_str = escape(", ".join(tags)) if tags else "[dim]none[/dim]"
+        else:
+            daemon_status = f"[bold red]OFFLINE ({escape(err or 'refused')})[/bold red]"
+            git_status = "[dim red]UNKNOWN[/dim red]"
+            engine_status = "[dim red]UNKNOWN[/dim red]"
+            live_caps_str = "[dim red]unreachable[/dim red]"
+
+        table.add_row(
+            escape(worker.id),
+            daemon_status,
+            git_status,
+            engine_status,
+            live_caps_str
+        )
 
     console.print("\n", table, "\n")
-
 
 
 @cli.command(name="dispatch")
@@ -547,9 +616,9 @@ def dispatch_cmd(
 
     console.print(Panel.fit(
         f"[bold cyan]Dispatching Swarm Job[/bold cyan]\n"
-        f"[white]{prompt}[/white]\n"
-        f"[dim]Origin:[/dim] {resolved_repo}\n"
-        f"[dim]Workers ({len(selected)}):[/dim] {', '.join(w.id for w in selected)}",
+        f"[white]{escape(prompt)}[/white]\n"
+        f"[dim]Origin:[/dim] {escape(resolved_repo)}\n"
+        f"[dim]Workers ({len(selected)}):[/dim] {escape(', '.join(w.id for w in selected))}",
         border_style="cyan",
     ))
 
@@ -577,7 +646,7 @@ def dispatch_cmd(
 
     console.print(Panel.fit(
         f"[bold green]Dispatched run {run.run_id}[/bold green]\n"
-        f"[dim]Origin:[/dim] {run.repo_url}\n"
+        f"[dim]Origin:[/dim] {escape(run.repo_url)}\n"
         "[dim]Follow progress with[/dim] [bold white]hive status[/bold white]",
         border_style="green",
     ))
@@ -611,10 +680,10 @@ def status_cmd(run_id: Optional[str], cluster: Optional[str]):
         run = refresh_run(run, workers_by_id)
         progress.advance(task, advance=len(run.workers))
 
-    console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {run.repo_url}[/dim]")
+    console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {escape(run.repo_url)}[/dim]")
     _print_run_table(run)
 
-    all_done = all(w.status in {"succeeded", "failed"} for w in run.workers)
+    all_done = all(w.status in TERMINAL_STATUSES for w in run.workers)
     if all_done and run.workers:
         console.print("[dim]All workers finished. Review branches, then[/dim] [bold white]hive merge[/bold white].\n")
 
@@ -639,7 +708,13 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
     run = refresh_run(run, workers_by_id)
     _print_run_table(run, title=f"Pick a winner for {run.run_id}")
 
-    finished = [w for w in run.workers if w.branch]
+    finished = [
+        w for w in run.workers
+        if w.branch
+        and w.pushed is not False
+        and w.status not in ("no_changes", "cancelled", "starting", "running")
+        and not (w.status == "failed" and w.pushed is not True and w.agent_exit_code is None)
+    ]
     if not finished:
         console.print("[bold red]Error:[/bold red] No worker branches are available to merge yet.")
         return

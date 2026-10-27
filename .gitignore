@@ -60,3 +60,4 @@ Thumbs.db
 
 # Local tests (kept out of git)
 tests/
+*.jsonl

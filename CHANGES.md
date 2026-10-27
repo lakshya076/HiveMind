@@ -63,3 +63,25 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 34. Total: 14 passed.
 35. Mutation-checked: disabling the key guard makes 4 round-1 tests fail.
 36. Mutation-checked: making the presence probe send the key again (the old behaviour) makes 3 round-2 tests fail.
+
+---
+
+## Round 3: high-impact accuracy and performance upgrades
+
+### Accuracy and correctness (A4, A10, A11, A12, A15)
+37. `branch_name()` (`runner/remote.py`) scopes experiment branches by run ID (`exp/<run_id>/<worker>-<strategy>`), so later dispatches no longer overwrite earlier runs' branches on `origin`.
+38. `WorkerRunState` (`runner/state.py`) records `pushed`, `commit`, `bench_exit_code`, and `benchmark_data` alongside `benchmark_path`.
+39. `refresh_run()` (`runner/status.py`) reads `benchmark_data`, `bench_exit_code`, `pushed`, and `commit` from the worker's `/status/<run_id>` response.
+40. `_print_run_table()` (`cli.py`) renders a `Benchmark` column when `--bench` is used or when any worker reports benchmark results.
+41. `_status_style()` and `TERMINAL_STATUSES` handle `"no_changes"` and `"cancelled"` so `hive status` recognises finished runs and styles both states clearly.
+42. `hive merge` filters out workers whose status is `"no_changes"` or `"cancelled"` or where `pushed` is `False`, so it does not offer branches that were never pushed to `origin`.
+43. `hive discover` loads the existing `cluster.json` if present, preserves `cluster_name` and `repo_url`, and merges newly configured workers into the existing worker list by ID or `(host, port)` instead of wiping unselected workers.
+44. `.gitignore`: added `*.jsonl` and removed the stray conversation `.jsonl` file from the repository root.
+
+### Performance (P1)
+45. `hive check` (`cli.py`) probes all configured workers concurrently via `ThreadPoolExecutor` instead of sequentially one by one.
+46. `refresh_run()` (`runner/status.py`) polls all workers in a run concurrently via `ThreadPoolExecutor`, speeding up both `hive status` and `hive merge`.
+
+### Testing (local, not committed)
+47. Added 5 tests in `tests/test_accuracy_perf.py` covering run-scoped branch names, benchmark result rendering and terminal status handling in `hive status`, `hive discover` config merging (`repo_url` and existing workers preserved), parallel worker polling in `hive check` and `refresh_run()`, and `hive merge` filtering of unpushed/`no_changes` workers.
+48. Total master suite: 19 passed.

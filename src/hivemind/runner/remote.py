@@ -1,4 +1,3 @@
-import json
 import re
 from typing import Optional
 
@@ -13,8 +12,11 @@ def slugify(value: str) -> str:
     return slug or "strategy"
 
 
-def branch_name(worker_id: str, strategy: str) -> str:
-    return f"exp/{slugify(worker_id)}-{slugify(strategy)}"
+def branch_name(worker_id: str, strategy: str, run_id: Optional[str] = None) -> str:
+    base = f"{slugify(worker_id)}-{slugify(strategy)}"
+    if run_id and run_id.strip():
+        return f"exp/{slugify(run_id)}/{base}"
+    return f"exp/{base}"
 
 
 def _get_auth_headers() -> dict[str, str]:
@@ -38,7 +40,7 @@ def start_worker_job(
     model: Optional[str],
 ) -> WorkerRunState:
     """Dispatch task to hivemind-worker HTTP daemon. Returns immediately."""
-    branch = branch_name(worker.id, strategy)
+    branch = branch_name(worker.id, strategy, run_id=run_id)
     state = WorkerRunState(
         worker_id=worker.id,
         host=worker.host,
@@ -80,7 +82,7 @@ def start_worker_job(
                 state.status = "failed"
                 state.error = f"Worker rejected task (HTTP {resp.status_code}): {resp.text}"
                 return state
-            
+
             data = resp.json()
             state.status = data.get("status", "running")
     except httpx.ConnectError:
@@ -116,4 +118,3 @@ def read_worker_result(worker: WorkerNode, run_id: str) -> tuple[str, Optional[d
         return "unknown", None, f"Connection to {worker.host}:{worker.port} refused"
     except Exception as exc:
         return "unknown", None, f"Status poll error: {exc}"
-
