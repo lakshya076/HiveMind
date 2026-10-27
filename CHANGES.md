@@ -104,3 +104,11 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 53. `local_base_branch()` (`runner/status.py`) checks `refs/remotes/origin/HEAD` first, then `main` and `master`, and then the currently checked-out non-`exp/` branch so repositories using `develop` or `trunk` merge cleanly.
 54. `hive merge` previews commits and diff statistics against the local target branch (`<base>..origin/<branch>`) when `<base>` exists locally, matching the branch `git merge` actually merges into.
 55. Added A13 end-to-end test in `tests/test_accuracy_perf.py`.
+
+### A16 + P8: Cross-platform LAN discovery, worker port probing, and large-subnet cap
+56. New `parse_arp_output()` (`discovery/scanner.py`) parses Windows, Linux, and macOS `arp -a` output formats and invokes `["arp", "-a"]` without `shell=True`.
+57. Broadcast (`255.255.255.255`, `*.255`, `ff:ff:ff:ff:ff:ff`), multicast (`224.0.0.0/4`), loopback, link-local, and incomplete ARP entries are filtered out so they are no longer listed as candidate worker machines.
+58. `NetworkScanner.resolve_hostname()` no longer calls `socket.setdefaulttimeout()`, avoiding thread-unsafe process-wide socket timeout mutation during concurrent scans.
+59. `NetworkScanner.probe_host()` and `scan_subnet()` probe the configured worker `daemon_port` (default `7422`) instead of SSH port `22`, so workers without an SSH server are found on LAN scans.
+60. `NetworkScanner._candidate_hosts()` caps oversized subnets (>1,024 addresses, such as `/16` VPN or Docker networks) to the `/24` slice around the interface IP plus known ARP entries in the subnet.
+61. Added A16 + P8 unit and integration tests in `tests/test_accuracy_perf.py` (total master suite: 22 passed).

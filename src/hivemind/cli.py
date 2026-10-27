@@ -296,7 +296,9 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
 
                 local_devs = NetworkScanner.scan_subnet(
                     chosen_iface["network"],
-                    progress_callback=update_progress
+                    progress_callback=update_progress,
+                    daemon_port=daemon_port,
+                    interface_ip=chosen_iface["ip"],
                 )
                 # Deduplicate by IP
                 existing_ips = {d.ip for d in discovered}
