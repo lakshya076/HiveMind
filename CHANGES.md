@@ -120,3 +120,9 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 ### V1: Reject UNC network share `repo_url` values on master
 62. `resolve_repo_url()` (`runner/dispatch.py`) rejects UNC network share paths (`\\server\share`, `//server/share`, `file:////...`) before dispatching to workers.
 63. Added `test_v1_master_rejects_unc_repo_urls` in `tests/test_accuracy_perf.py`.
+
+### V4: Confinement and path-traversal validation for `run_id` on master
+64. New `validate_run_id()` and `_run_file_for()` (`runner/state.py`) enforce `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, reject `..`, and verify that `RunState.path` and `RunState.load()` stay strictly inside `~/.hivemind/runs/`.
+65. `read_worker_result()` (`runner/remote.py`) validates `run_id` before constructing `http://<host>:<port>/status/<run_id>` so a poisoned `remote_run_dir` or `run_id` cannot inject path traversal into worker status requests.
+66. `_load_run()` (`cli.py`) handles invalid `run_id` values cleanly in `hive status` and `hive merge`.
+67. Added `test_v4_master_run_state_and_status_reject_path_traversal_run_ids` in `tests/test_accuracy_perf.py` (total master suite: 24 passed).

@@ -4,7 +4,7 @@ from typing import Optional
 import httpx
 
 from hivemind.config.cluster import WorkerNode, get_fleet_key
-from hivemind.runner.state import WorkerRunState
+from hivemind.runner.state import WorkerRunState, validate_run_id
 
 
 def slugify(value: str) -> str:
@@ -97,7 +97,11 @@ def start_worker_job(
 
 def read_worker_result(worker: WorkerNode, run_id: str) -> tuple[str, Optional[dict], str]:
     """Poll hivemind-worker status endpoint for run_id. Return (status, payload_dict, log_tail)."""
-    url = f"http://{worker.host}:{worker.port}/status/{run_id}"
+    try:
+        clean_run_id = validate_run_id(run_id)
+    except ValueError as exc:
+        return "unknown", None, f"Invalid run_id: {exc}"
+    url = f"http://{worker.host}:{worker.port}/status/{clean_run_id}"
     headers = _get_auth_headers()
 
     try:

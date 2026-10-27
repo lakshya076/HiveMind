@@ -64,7 +64,7 @@ def _require_fleet_key() -> bool:
 def _load_run(run_id: Optional[str]) -> Optional[RunState]:
     try:
         return RunState.load(run_id) if run_id else RunState.load_latest()
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         return None
 

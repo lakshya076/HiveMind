@@ -1,13 +1,37 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from hivemind.config.cluster import get_hivemind_home
 
 LATEST_POINTER = "latest"
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def validate_run_id(value: str) -> str:
+    """Ensure run_id is a single safe identifier with no path traversal."""
+    if not isinstance(value, str):
+        raise ValueError("run_id must be a string")
+    cleaned = value.strip()
+    if not cleaned or ".." in cleaned or not _RUN_ID_RE.match(cleaned):
+        raise ValueError(
+            f"Invalid run_id {value!r}: must be 1-128 characters of [A-Za-z0-9._-] and cannot contain '..'"
+        )
+    return cleaned
+
+
+def _run_file_for(run_id: str) -> Path:
+    """Return the confined state file path for run_id inside ~/.hivemind/runs/."""
+    clean_id = validate_run_id(run_id)
+    root = get_runs_dir().expanduser().resolve()
+    target = (root / f"{clean_id}.json").resolve()
+    if target.parent != root or not target.is_relative_to(root):
+        raise ValueError(f"Refusing run_id {run_id!r} outside runs directory")
+    return target
 
 
 def utc_now() -> str:
@@ -57,9 +81,14 @@ class RunState(BaseModel):
     created_at: str = Field(default_factory=utc_now)
     workers: List[WorkerRunState] = Field(default_factory=list)
 
+    @field_validator("run_id")
+    @classmethod
+    def _check_run_id(cls, value: str) -> str:
+        return validate_run_id(value)
+
     @property
     def path(self) -> Path:
-        return get_runs_dir() / f"{self.run_id}.json"
+        return _run_file_for(self.run_id)
 
     def save(self) -> Path:
         file_path = self.path
@@ -69,7 +98,7 @@ class RunState(BaseModel):
 
     @classmethod
     def load(cls, run_id: str) -> "RunState":
-        file_path = get_runs_dir() / f"{run_id}.json"
+        file_path = _run_file_for(run_id)
         if not file_path.exists():
             raise FileNotFoundError(f"Run '{run_id}' not found at {file_path}")
         return cls.model_validate_json(file_path.read_text(encoding="utf-8"))
