@@ -124,5 +124,15 @@ Companion to the worker fixes for critical #1 (workers ran unauthenticated witho
 ### V4: Confinement and path-traversal validation for `run_id` on master
 64. New `validate_run_id()` and `_run_file_for()` (`runner/state.py`) enforce `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, reject `..`, and verify that `RunState.path` and `RunState.load()` stay strictly inside `~/.hivemind/runs/`.
 65. `read_worker_result()` (`runner/remote.py`) validates `run_id` before constructing `http://<host>:<port>/status/<run_id>` so a poisoned `remote_run_dir` or `run_id` cannot inject path traversal into worker status requests.
-66. `_load_run()` (`cli.py`) handles invalid `run_id` values cleanly in `hive status` and `hive merge`.
-67. Added `test_v4_master_run_state_and_status_reject_path_traversal_run_ids` in `tests/test_accuracy_perf.py` (total master suite: 24 passed).
+127. `_load_run()` (`cli.py`) handles invalid `run_id` values cleanly in `hive status` and `hive merge`.
+128. Added `test_v4_master_run_state_and_status_reject_path_traversal_run_ids` in `tests/test_accuracy_perf.py` (total master suite: 24 passed).
+
+---
+
+## Round 7: deep security audit fixes (Medium severity)
+
+### V6: Prevent untrusted `./cluster.json` auto-loading and validate `WorkerNode.host` / `port`
+68. `ClusterConfig.load()` (`config/cluster.py`) no longer silently falls back to `./cluster.json` in the current working directory when `~/.hivemind/cluster.json` is absent, preventing an untrusted repository's `cluster.json` from exfiltrating the master's `Authorization: Bearer <fleet_key>`.
+69. New `validate_worker_host()` (`config/cluster.py`) verifies that `WorkerNode.host` is a valid IPv4/IPv6 literal or DNS hostname and rejects URL authority/path injection characters (`/`, `\`, `?`, `#`, `@`, whitespace, control chars, `..`).
+70. `WorkerNode.port` is bounded to `1..65535` and `WorkerNode.id` to `1..128` characters.
+71. Added `test_v6_cluster_config_ignores_untrusted_cwd_fallback_and_validates_worker_host_and_port` in `tests/test_accuracy_perf.py`.

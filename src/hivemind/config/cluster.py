@@ -1,8 +1,36 @@
-import os
+import ipaddress
 import json
+import os
+import re
 from pathlib import Path
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+
+
+def validate_worker_host(value: str) -> str:
+    """Validate that worker host is a bare IP literal or hostname with no URL authority/path injection."""
+    if not isinstance(value, str):
+        raise ValueError("host must be a string")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("host cannot be empty")
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in cleaned):
+        raise ValueError(f"Invalid worker host {value!r}: whitespace and control characters are not allowed")
+    if any(ch in cleaned for ch in ("/", "\\", "?", "#", "@")):
+        raise ValueError(f"Invalid worker host {value!r}: URL authority/path characters are not allowed")
+
+    unbracketed = cleaned[1:-1] if (cleaned.startswith("[") and cleaned.endswith("]")) else cleaned
+    try:
+        ip = ipaddress.ip_address(unbracketed)
+        return str(ip)
+    except ValueError:
+        pass
+
+    if ":" in cleaned or ".." in cleaned or not _HOSTNAME_RE.match(cleaned):
+        raise ValueError(f"Invalid worker host {value!r}: must be a valid IP address or hostname")
+    return cleaned
 
 
 def get_hivemind_home() -> Path:
@@ -30,13 +58,18 @@ def get_fleet_key() -> Optional[str]:
 
 class WorkerNode(BaseModel):
     """Configuration for an individual worker machine in the cluster."""
-    id: str = Field(..., description="Unique human-readable identifier for the worker")
+    id: str = Field(..., min_length=1, max_length=128, description="Unique human-readable identifier for the worker")
     host: str = Field(..., description="IP address or hostname of the machine (Tailscale / LAN)")
-    port: int = Field(default=7422, description="Worker HTTP daemon port (default: 7422)")
+    port: int = Field(default=7422, ge=1, le=65535, description="Worker HTTP daemon port (default: 7422)")
     user: Optional[str] = Field(default=None, description="Optional worker username")
     workspace_dir: str = Field(default="~/hive-workspace", description="Target workspace directory on worker")
     agent_engine: str = Field(default="claude-code", description="AI Coding CLI engine (e.g. claude-code, agy, aider)")
     capabilities: List[str] = Field(default_factory=list, description="Hardware/software tags (e.g. gpu, 32-cores)")
+
+    @field_validator("host")
+    @classmethod
+    def _check_host(cls, value: str) -> str:
+        return validate_worker_host(value)
 
 
 class ClusterConfig(BaseModel):
@@ -47,30 +80,16 @@ class ClusterConfig(BaseModel):
 
     @classmethod
     def load(cls, path: Optional[str | Path] = None) -> "ClusterConfig":
-        if path is not None:
-            file_path = Path(path)
-        else:
-            file_path = get_default_cluster_path()
-            if not file_path.exists():
-                # Fallback to local ./cluster.json if global doesn't exist
-                local_path = Path("cluster.json")
-                if local_path.exists():
-                    file_path = local_path
-
+        file_path = Path(path) if path is not None else get_default_cluster_path()
         if not file_path.exists():
             raise FileNotFoundError(f"Cluster configuration file '{file_path}' not found.")
-        
+
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls.model_validate(data)
 
     def save(self, path: Optional[str | Path] = None) -> Path:
-        if path is not None:
-            file_path = Path(path)
-        else:
-            file_path = get_default_cluster_path()
-        
-        # Ensure ~/.hivemind directory exists
+        file_path = Path(path) if path is not None else get_default_cluster_path()
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(file_path, "w", encoding="utf-8") as f:
