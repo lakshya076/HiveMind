@@ -258,10 +258,20 @@ hive dispatch "Optimize sorting algorithm" \
 | `PROMPT` | *(Required)* The task instruction for the AI agents |
 | `--repo <url>` | Git origin URL (overrides `repo_url` in `cluster.json`) |
 | `--workers <id1,id2>` | Comma-separated worker IDs (default: all workers) |
-| `--strategy <name>` | Named strategy (repeatable, e.g. `--strategy simd --strategy async`) |
+| `--strategy <name>` | Named strategy (repeatable, e.g. `--strategy simd --strategy async`). More strategies than workers wrap round the workers, so one worker can run several |
 | `--test <cmd>` | Test command executed after agent completes |
 | `--bench <cmd>` | Benchmark command producing JSON output |
 | `--model <id>` | Model override for the worker engine |
+
+**How strategies map to workers.** Each strategy is one slot. Strategy *n* goes to worker *n*, wrapping round when there are more strategies than workers. Slots without a name get `strategy-<n>`. A worker that gets several slots queues those beyond its `max_concurrent_runs` (default 2). Examples:
+
+* `--workers ari --strategy simd --strategy actor`: both strategies run on `ari`.
+* `--workers ari,ari`: same thing, with default names `strategy-1` and `strategy-2`.
+* Two slots with the same strategy name on the same worker are rejected, because both would push to the same branch.
+
+Each slot uses its own run ID on the worker (`<run_id>-<n>`), while the branch keeps the shared `<run_id>`.
+
+The worker's `agent_engine` in `cluster.json` must be one the worker can launch: `claude-code` (alias `claude`), `agy` or `aider`. Anything else is rejected when the cluster is loaded.
 
 ### Step 6: Track Live Execution (`hive status`)
 
@@ -296,7 +306,7 @@ hive merge
 ```
 
 1. Refreshes the run and displays the worker results with test outcomes.
-2. Prompts you to pick the winning worker (default: the first `succeeded` one). Workers that are still running, ended `no_changes` or `cancelled`, or report `pushed: false` are not offered.
+2. Prompts you to pick the winning worker (default: the first `succeeded` one). When one worker ran several strategies, pick with `<worker>:<strategy>`, e.g. `ari:simd`. Workers that are still running, ended `no_changes` or `cancelled`, or report `pushed: false` are not offered.
 3. Fetches the winning branch (`exp/<run_id>/<worker>-<strategy>`) from the Git remote.
 4. Previews the commits and `git diff --stat` against your base branch.
 5. After you confirm, checks out the base branch and merges with `git merge --no-ff` (message `hive: merge <branch> from <run_id>`). It does not push; run `git push` when you are happy.

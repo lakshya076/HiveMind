@@ -30,6 +30,7 @@ def start_worker_job(
     worker: WorkerNode,
     *,
     run_id: str,
+    remote_run_id: Optional[str] = None,
     repo_url: str,
     prompt: str,
     strategy: str,
@@ -39,7 +40,11 @@ def start_worker_job(
     bench_command: Optional[str],
     model: Optional[str],
 ) -> WorkerRunState:
-    """Dispatch task to hivemind-worker HTTP daemon. Returns immediately."""
+    """Dispatch task to hivemind-worker HTTP daemon. Returns immediately.
+
+    ``remote_run_id`` is the run ID used on the worker (default: ``run_id``).
+    """
+    remote_run_id = validate_run_id(remote_run_id or run_id)
     branch = branch_name(worker.id, strategy, run_id=run_id)
     state = WorkerRunState(
         worker_id=worker.id,
@@ -51,12 +56,12 @@ def start_worker_job(
         strategy=strategy,
         branch=branch,
         status="starting",
-        remote_run_dir=run_id,
+        remote_run_dir=remote_run_id,
     )
 
     url = f"http://{worker.host}:{worker.port}/dispatch"
     payload = {
-        "run_id": run_id,
+        "run_id": remote_run_id,
         "repo_url": repo_url,
         "prompt": prompt,
         "strategy": strategy,

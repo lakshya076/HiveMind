@@ -81,8 +81,27 @@ def test_select_workers_on_empty_cluster():
 
 
 def test_assign_strategies_fills_unnamed_slots():
-    assert assign_strategies([ARI, HERMES], ["simd"]) == ["simd", "strategy-2"]
-    assert assign_strategies([ARI], ["simd", "extra"]) == ["simd"]
+    assert assign_strategies([ARI, HERMES], ["simd", " "]) == ([ARI, HERMES], ["simd", "strategy-2"])
+
+
+def test_extra_strategies_wrap_round_the_workers():
+    workers, strategies = assign_strategies([ARI, HERMES], ["a", "b", "c"])
+    assert workers == [ARI, HERMES, ARI]
+    assert strategies == ["a", "b", "c"]
+
+
+def test_repeated_worker_gets_distinct_default_strategies():
+    assert assign_strategies([ARI, ARI], []) == ([ARI, ARI], ["strategy-1", "strategy-2"])
+
+
+def test_same_strategy_twice_on_one_worker_is_rejected():
+    # Both would push to the same exp/<run_id>/ari-simd branch.
+    with pytest.raises(DispatchError, match="twice"):
+        assign_strategies([ARI], ["simd", "SIMD"])
+
+
+def test_same_strategy_on_different_workers_is_fine():
+    assert assign_strategies([ARI, HERMES], ["simd", "simd"])[1] == ["simd", "simd"]
 
 
 def test_resolve_repo_url_prefers_override():
@@ -133,7 +152,7 @@ def test_dispatch_run_posts_to_every_worker_with_auth(fleet_key, fake_http):
     assert hermes_req.url.path == "/dispatch"
     assert hermes_req.headers["authorization"] == f"Bearer {fleet_key}"
     body = json.loads(hermes_req.content)
-    assert body["run_id"] == run.run_id
+    assert body["run_id"] == f"{run.run_id}-2"
     assert body["prompt"] == "fix the bug"
     assert body["branch"] == f"exp/{run.run_id}/hermes-actor-queue"
     assert body["agent_engine"] == "aider"
@@ -141,8 +160,24 @@ def test_dispatch_run_posts_to_every_worker_with_auth(fleet_key, fake_http):
     assert body["test_command"] == "pytest -q"
 
     assert [w.worker_id for w in run.workers] == ["ari", "Hermes"]
+    assert [w.remote_run_dir for w in run.workers] == [f"{run.run_id}-1", f"{run.run_id}-2"]
     assert all(w.status == "starting" for w in run.workers)
     assert RunState.load(run.run_id) == run
+
+
+def test_one_worker_runs_several_strategies_under_separate_ids(fleet_key, fake_http):
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "starting"})
+    workers, strategies = assign_strategies([ARI], ["simd", "actor-queue"])
+
+    run = dispatch_run(CLUSTER, "p", repo_url="r", workers=workers, strategies=strategies)
+
+    bodies = sorted((json.loads(r.content) for r in fake_http.requests), key=lambda b: b["run_id"])
+    assert [b["run_id"] for b in bodies] == [f"{run.run_id}-1", f"{run.run_id}-2"]
+    assert [b["branch"] for b in bodies] == [
+        f"exp/{run.run_id}/ari-simd",
+        f"exp/{run.run_id}/ari-actor-queue",
+    ]
+    assert {r.url.host for r in fake_http.requests} == {ARI.host}
 
 
 def test_dispatch_run_records_rejections_and_offline_workers(fleet_key, fake_http):

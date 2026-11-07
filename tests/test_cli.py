@@ -138,6 +138,53 @@ def test_merge_refuses_repo_with_different_origin(
     assert "origin does not match" in result.output
 
 
+def test_dispatch_runs_several_strategies_on_one_worker(runner, fleet_key, fake_http):
+    ClusterConfig(repo_url="r", workers=[WorkerNode(id="ari", host="10.0.0.2")]).save()
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "starting"})
+
+    result = runner.invoke(cli, ["dispatch", "fix it", "--strategy", "simd", "--strategy", "actor"])
+
+    assert result.exit_code == 0, result.output
+    run = RunState.load_latest()
+    assert [(w.worker_id, w.strategy) for w in run.workers] == [("ari", "simd"), ("ari", "actor")]
+    assert len(fake_http.requests) == 2
+
+
+def test_merge_picks_one_of_several_strategies_on_same_worker(
+    runner, fleet_key, fake_http, origin_repo, tmp_path, git, monkeypatch
+):
+    origin, local = origin_repo
+    simd = f"exp/{RUN_ID}/ari-simd"
+    actor = f"exp/{RUN_ID}/ari-actor"
+    push_worker_branch(tmp_path, origin, git, actor)
+    run = RunState(
+        run_id=RUN_ID, prompt="p", repo_url=str(origin),
+        workers=[
+            WorkerRunState(
+                worker_id="ari", host="10.0.0.2", port=7422, user="dev", workspace_dir="~",
+                agent_engine="aider", strategy=strategy, branch=branch,
+                remote_run_dir=f"{RUN_ID}-{i}", status="succeeded", pushed=True,
+            )
+            for i, (strategy, branch) in enumerate((("simd", simd), ("actor", actor)), 1)
+        ],
+    )
+    run.save()
+    branches = {f"/status/{RUN_ID}-1": simd, f"/status/{RUN_ID}-2": actor}
+    fake_http.handler = lambda request: httpx.Response(
+        200, json={"status": "succeeded", "branch": branches[request.url.path], "pushed": True}
+    )
+    monkeypatch.chdir(local)
+
+    result = runner.invoke(cli, ["merge"], input="ari:actor\ny\n")
+
+    assert result.exit_code == 0, result.output
+    assert git(local, "log", "-1", "--format=%s") == f"hive: merge {actor} from {RUN_ID}"
+
+    # A bare worker id is ambiguous when that worker ran several strategies.
+    result = runner.invoke(cli, ["merge"], input="ari\n")
+    assert "Unknown worker 'ari'" in result.output
+
+
 @pytest.mark.parametrize("status, pushed", [("no_changes", False), ("cancelled", None), ("succeeded", False)])
 def test_merge_offers_nothing_for_unpushed_branches(runner, fleet_key, fake_http, status, pushed):
     branch = f"exp/{RUN_ID}/ari-strategy-1"

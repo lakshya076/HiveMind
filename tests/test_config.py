@@ -52,6 +52,18 @@ def test_worker_port_out_of_range_is_rejected(port):
         WorkerNode(id="ari", host="10.0.0.2", port=port)
 
 
+@pytest.mark.parametrize("engine, stored", [("aider", "aider"), (" Claude-Code ", "claude-code"), ("claude", "claude"), ("agy", "agy")])
+def test_supported_engines_accepted(engine, stored):
+    assert WorkerNode(id="ari", host="10.0.0.2", agent_engine=engine).agent_engine == stored
+
+
+@pytest.mark.parametrize("engine", ["custom", "cursor", ""])
+def test_unsupported_engine_rejected(engine):
+    # The worker would refuse every dispatch to it, so fail at config time instead.
+    with pytest.raises(ValidationError, match="Unsupported agent_engine"):
+        WorkerNode(id="ari", host="10.0.0.2", agent_engine=engine)
+
+
 def test_worker_id_cannot_be_empty():
     with pytest.raises(ValidationError):
         WorkerNode(id="", host="10.0.0.2")

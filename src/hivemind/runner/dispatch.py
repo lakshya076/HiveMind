@@ -3,7 +3,7 @@ import re
 from typing import Optional, Sequence
 
 from hivemind.config.cluster import ClusterConfig, WorkerNode
-from hivemind.runner.remote import start_worker_job
+from hivemind.runner.remote import slugify, start_worker_job
 from hivemind.runner.state import RunState, WorkerRunState, new_run_id
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
@@ -46,14 +46,31 @@ def select_workers(config: ClusterConfig, worker_ids: Optional[Sequence[str]]) -
     return [by_id[wid] for wid in wanted]
 
 
-def assign_strategies(workers: Sequence[WorkerNode], named: Sequence[str]) -> list[str]:
-    strategies: list[str] = []
-    for index, _worker in enumerate(workers):
-        if index < len(named) and named[index].strip():
-            strategies.append(named[index].strip())
-        else:
-            strategies.append(f"strategy-{index + 1}")
-    return strategies
+def assign_strategies(
+    workers: Sequence[WorkerNode], named: Sequence[str]
+) -> tuple[list[WorkerNode], list[str]]:
+    """Pair each strategy with a worker slot.
+
+    With more strategies than workers, strategies wrap round the workers, so one
+    worker runs several (its daemon queues them beyond max_concurrent_runs).
+    Unnamed slots get strategy-<n>. Returns parallel (slot_workers, strategies).
+    """
+    if not workers:
+        raise DispatchError("No workers selected.")
+    names = [name.strip() for name in named if name.strip()]
+    count = max(len(workers), len(names))
+    slot_workers = [workers[i % len(workers)] for i in range(count)]
+    strategies = [names[i] if i < len(names) else f"strategy-{i + 1}" for i in range(count)]
+
+    seen: set[tuple[str, str]] = set()
+    for worker, strategy in zip(slot_workers, strategies):
+        key = (worker.id, slugify(strategy))
+        if key in seen:
+            raise DispatchError(
+                f"Worker '{worker.id}' would run strategy '{strategy}' twice; give each strategy a distinct name."
+            )
+        seen.add(key)
+    return slot_workers, strategies
 
 
 def resolve_repo_url(config: ClusterConfig, repo_override: Optional[str]) -> str:
@@ -109,6 +126,8 @@ def dispatch_run(
         return start_worker_job(
             worker,
             run_id=run_id,
+            # Own ID per slot, so one worker can run several strategies of the same run.
+            remote_run_id=f"{run_id}-{index + 1}",
             repo_url=repo_url,
             prompt=prompt.strip(),
             strategy=strategies[index],

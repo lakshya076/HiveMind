@@ -121,6 +121,13 @@ def _merge_workers(existing: list[WorkerNode], updated: list[WorkerNode]) -> lis
     return merged
 
 
+def _worker_label(run: RunState, worker: WorkerRunState) -> str:
+    """Worker id, or id:strategy when that worker ran several strategies in this run."""
+    if sum(w.worker_id == worker.worker_id for w in run.workers) > 1:
+        return f"{worker.worker_id}:{worker.strategy}"
+    return worker.worker_id
+
+
 def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     show_bench = bool(run.bench_command) or any(
         w.benchmark_data is not None or w.bench_exit_code is not None or w.benchmark_path
@@ -456,7 +463,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
         default_engine = "aider" if "engine:aider" in detected_tags else ("agy" if "engine:agy" in detected_tags else "claude-code")
         agent_engine = Prompt.ask(
             "  AI Coding CLI Engine",
-            choices=["claude-code", "agy", "aider", "custom"],
+            choices=["claude-code", "agy", "aider"],
             default=default_engine
         )
 
@@ -632,7 +639,7 @@ def dispatch_cmd(
     worker_ids = [wid.strip() for wid in worker_ids_csv.split(",")] if worker_ids_csv else None
     try:
         selected = select_workers(config, worker_ids)
-        assigned_strategies = assign_strategies(selected, strategies)
+        slot_workers, assigned_strategies = assign_strategies(selected, strategies)
         resolved_repo = resolve_repo_url(config, repo_url)
     except DispatchError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
@@ -642,7 +649,8 @@ def dispatch_cmd(
         f"[bold cyan]Dispatching Swarm Job[/bold cyan]\n"
         f"[white]{escape(prompt)}[/white]\n"
         f"[dim]Origin:[/dim] {escape(resolved_repo)}\n"
-        f"[dim]Workers ({len(selected)}):[/dim] {escape(', '.join(w.id for w in selected))}",
+        f"[dim]Strategies ({len(slot_workers)}):[/dim] "
+        f"{escape(', '.join(f'{s} on {w.id}' for w, s in zip(slot_workers, assigned_strategies)))}",
         border_style="cyan",
     ))
 
@@ -651,13 +659,13 @@ def dispatch_cmd(
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Dispatching tasks to worker daemons...", total=len(selected))
+        task = progress.add_task("Dispatching tasks to worker daemons...", total=len(slot_workers))
         try:
             run = dispatch_run(
                 config,
                 prompt,
                 repo_url=resolved_repo,
-                workers=selected,
+                workers=slot_workers,
                 strategies=assigned_strategies,
                 test_command=test_command,
                 bench_command=bench_command,
@@ -666,7 +674,7 @@ def dispatch_cmd(
         except DispatchError as exc:
             console.print(f"[bold red]Error:[/bold red] {exc}")
             return
-        progress.advance(task, advance=len(selected))
+        progress.advance(task, advance=len(slot_workers))
 
     console.print(Panel.fit(
         f"[bold green]Dispatched run {run.run_id}[/bold green]\n"
@@ -743,12 +751,16 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
         console.print("[bold red]Error:[/bold red] No worker branches are available to merge yet.")
         return
 
-    default_id = next((w.worker_id for w in finished if w.status == "succeeded"), finished[0].worker_id)
-    choice = Prompt.ask("Worker id to merge", default=default_id)
-    winner = next((w for w in finished if w.worker_id == choice), None)
-    if winner is None:
-        console.print(f"[bold red]Error:[/bold red] Unknown worker '{choice}'.")
+    default_w = next((w for w in finished if w.status == "succeeded"), finished[0])
+    choice = Prompt.ask(
+        "Worker to merge (id, or id:strategy when a worker ran several)",
+        default=_worker_label(run, default_w),
+    )
+    matches = [w for w in finished if choice in (_worker_label(run, w), f"{w.worker_id}:{w.strategy}")]
+    if len(matches) != 1:
+        console.print(f"[bold red]Error:[/bold red] Unknown worker '{escape(choice)}'.")
         return
+    winner = matches[0]
 
     try:
         validate_branch_ref(winner.branch)

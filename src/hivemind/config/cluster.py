@@ -8,6 +8,9 @@ from pydantic import BaseModel, Field, field_validator
 
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 
+# Engines hivemind-worker can launch ("claude" is the worker's alias for claude-code).
+SUPPORTED_ENGINES = ("claude-code", "claude", "agy", "aider")
+
 
 def validate_worker_host(value: str) -> str:
     """Validate that worker host is a bare IP literal or hostname with no URL authority/path injection."""
@@ -70,6 +73,16 @@ class WorkerNode(BaseModel):
     @classmethod
     def _check_host(cls, value: str) -> str:
         return validate_worker_host(value)
+
+    @field_validator("agent_engine")
+    @classmethod
+    def _check_engine(cls, value: str) -> str:
+        engine = value.strip().lower()
+        if engine not in SUPPORTED_ENGINES:
+            raise ValueError(
+                f"Unsupported agent_engine {value!r}: hivemind-worker supports {', '.join(SUPPORTED_ENGINES)}"
+            )
+        return engine
 
 
 class ClusterConfig(BaseModel):
