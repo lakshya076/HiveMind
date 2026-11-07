@@ -165,6 +165,23 @@ def test_logs_prints_worker_output_literally(runner, fleet_key, fake_http):
     assert "actor" not in result.output.split("simd", 1)[1]
 
 
+def test_output_streams_replace_unencodable_characters(monkeypatch):
+    # Found in the live e2e run: aider's log contains '►', and a cp1252 Windows
+    # console raised UnicodeEncodeError while `hive logs` printed it.
+    import io
+    import sys
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    cli_mod._make_output_streams_safe()
+    stream.write("► Applied edit to add.py")
+    stream.flush()
+
+    assert raw.getvalue() == b"? Applied edit to add.py"
+
+
 # ---------------------------------------------------------------- dispatch --engine, merge flags, check versions
 
 

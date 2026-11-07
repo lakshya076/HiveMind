@@ -23,8 +23,44 @@ WORKER_HEALTH = {"os": "linux", "arch": "x86_64", "cpu_cores": 4, "ram_gb": 7.6,
 def peers(monkeypatch):
     devices = [MASTER, ARI, STRANGER]
     monkeypatch.setattr(TailscaleScanner, "discover_peers", classmethod(lambda cls: list(devices)))
-    monkeypatch.setattr(TailscaleScanner, "is_available", classmethod(lambda cls: True))
+    monkeypatch.setattr(TailscaleScanner, "backend_state", classmethod(lambda cls: "Running"))
     return devices
+
+
+@pytest.mark.parametrize("state, reason", [("NoState", "not connected (state: NoState)"), (None, "not installed")])
+def test_discover_tailscale_explains_disconnected_client(fleet_key, fake_http, monkeypatch, state, reason):
+    monkeypatch.setattr(TailscaleScanner, "backend_state", classmethod(lambda cls: state))
+
+    result = CliRunner().invoke(cli, ["discover", "--tailscale"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)  # message, not a traceback
+    assert reason in result.output and "--local" in result.output
+    assert fake_http.requests == []
+
+
+def test_discover_peers_tolerates_null_fields(monkeypatch):
+    # Shape of `tailscale status --json` when the client is stopped or logged out.
+    monkeypatch.setattr(TailscaleScanner, "status_json", classmethod(lambda cls: {
+        "BackendState": "NoState",
+        "Self": {"HostName": "Artemis", "OS": "windows", "TailscaleIPs": None},
+        "Peer": None,
+    }))
+    assert TailscaleScanner.discover_peers() == []
+
+
+def test_discover_peers_keeps_online_ipv4_peers(monkeypatch):
+    monkeypatch.setattr(TailscaleScanner, "status_json", classmethod(lambda cls: {
+        "BackendState": "Running",
+        "Self": {"HostName": "Artemis", "OS": "windows", "TailscaleIPs": ["100.77.177.65", "fd7a::1"]},
+        "Peer": {
+            "a": {"HostName": "ari", "OS": "linux", "Online": True, "TailscaleIPs": ["100.101.58.76"]},
+            "b": {"HostName": "off", "OS": "linux", "Online": False, "TailscaleIPs": ["100.64.0.9"]},
+            "c": {"HostName": "v6", "OS": None, "Online": True, "TailscaleIPs": None},
+        },
+    }))
+    devices = TailscaleScanner.discover_peers()
+    assert [(d.ip, d.is_local_host) for d in devices] == [("100.77.177.65", True), ("100.101.58.76", False)]
 
 
 def only_ari_is_worker(request):

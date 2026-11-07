@@ -72,7 +72,7 @@ def test_discover_never_assigns_one_id_to_two_devices(runner, fleet_key, fake_ht
     first = DiscoveredDevice(ip="100.64.0.1", hostname="box", daemon_open=False)
     second = DiscoveredDevice(ip="100.64.0.2", hostname="box", daemon_open=False)
     monkeypatch.setattr(TailscaleScanner, "discover_peers", classmethod(lambda cls: [first, second]))
-    monkeypatch.setattr(TailscaleScanner, "is_available", classmethod(lambda cls: True))
+    monkeypatch.setattr(TailscaleScanner, "backend_state", classmethod(lambda cls: "Running"))
     fake_http.handler = lambda request: httpx.Response(
         200, json={"name": "HiveMind Worker Daemon", "version": "0.1.0"} if request.url.path == "/" else {}
     )

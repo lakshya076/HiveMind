@@ -198,11 +198,26 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     console.print()
 
 
+def _make_output_streams_safe() -> None:
+    """Replace characters the console can't encode instead of crashing.
+
+    Worker logs contain characters such as aider's '►', which a cp1252 Windows
+    console (or a redirected stream) cannot encode: printing them raised
+    UnicodeEncodeError in the middle of a command.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
+
 @click.group()
 @click.version_option(package_name="hivemind", prog_name="hive")
 def cli():
     """HiveMind: Distributed AI Coding Agent Fleet Orchestrator."""
-    pass
+    _make_output_streams_safe()
 
 
 @cli.command(name="keygen")
@@ -269,7 +284,14 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
             )
             sys.exit(1)
 
-    ts_available = TailscaleScanner.is_available()
+    ts_state = TailscaleScanner.backend_state()
+    ts_available = ts_state == "Running"
+    if use_tailscale and not ts_available:
+        reason = "is not installed" if ts_state is None else f"is not connected (state: {escape(ts_state)})"
+        _fail(
+            f"Tailscale {reason} on this machine. Connect it (e.g. [bold white]tailscale up[/bold white]), "
+            "or scan the local network with [bold cyan]hive discover --local[/bold cyan]."
+        )
 
     # Determine discovery mode
     mode = "tailscale" if use_tailscale else ("local" if use_local else None)

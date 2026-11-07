@@ -40,29 +40,11 @@ class TailscaleScanner:
         return None
 
     @classmethod
-    def is_available(cls) -> bool:
-        """Returns True if the Tailscale CLI is installed and responsive."""
+    def status_json(cls) -> Optional[dict]:
+        """Parsed ``tailscale status --json``, or None if the CLI is missing or fails."""
         binary = cls.get_tailscale_binary()
         if not binary:
-            return False
-        try:
-            res = subprocess.run(
-                [binary, "status", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-            )
-            return res.returncode == 0
-        except Exception:
-            return False
-
-    @classmethod
-    def discover_peers(cls) -> List[DiscoveredDevice]:
-        """Queries the local Tailscale daemon and returns all active Tailnet peers."""
-        binary = cls.get_tailscale_binary()
-        if not binary:
-            return []
-
+            return None
         try:
             res = subprocess.run(
                 [binary, "status", "--json"],
@@ -71,41 +53,61 @@ class TailscaleScanner:
                 timeout=4.0,
             )
             if res.returncode != 0 or not res.stdout.strip():
-                return []
+                return None
             data = json.loads(res.stdout)
         except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @classmethod
+    def backend_state(cls) -> Optional[str]:
+        """Tailscale's BackendState ("Running", "Stopped", "NeedsLogin", "NoState", ...), or None."""
+        data = cls.status_json()
+        return data.get("BackendState") if data else None
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """True only if Tailscale is installed AND connected; a stopped or logged-out client has no peers."""
+        return cls.backend_state() == "Running"
+
+    @classmethod
+    def discover_peers(cls) -> List[DiscoveredDevice]:
+        """Queries the local Tailscale daemon and returns all active Tailnet peers."""
+        data = cls.status_json()
+        if not data:
             return []
 
         devices: List[DiscoveredDevice] = []
 
+        # Fields are JSON null (not missing) when Tailscale is stopped or logged out.
         # 1. Add Self (Master node)
-        self_data = data.get("Self", {})
-        self_ips = self_data.get("TailscaleIPs", [])
+        self_data = data.get("Self") or {}
+        self_ips = self_data.get("TailscaleIPs") or []
         self_v4 = next((ip for ip in self_ips if ":" not in ip), None)
         if self_v4:
             devices.append(
                 DiscoveredDevice(
                     ip=self_v4,
-                    hostname=self_data.get("HostName", "Master"),
+                    hostname=self_data.get("HostName") or "Master",
                     daemon_open=False,
                     is_local_host=True,
-                    os_type=self_data.get("OS", "unknown").lower(),
+                    os_type=(self_data.get("OS") or "unknown").lower(),
                 )
             )
 
         # 2. Add Remote Peers
-        peers = data.get("Peer", {})
-        for peer_key, peer_info in peers.items():
+        peers = data.get("Peer") or {}
+        for peer_info in peers.values():
             if not peer_info.get("Online", False):
                 continue
 
-            peer_ips = peer_info.get("TailscaleIPs", [])
+            peer_ips = peer_info.get("TailscaleIPs") or []
             peer_v4 = next((ip for ip in peer_ips if ":" not in ip), None)
             if not peer_v4:
                 continue
 
-            hostname = peer_info.get("HostName", "Unknown")
-            os_type = peer_info.get("OS", "unknown").lower()
+            hostname = peer_info.get("HostName") or "Unknown"
+            os_type = (peer_info.get("OS") or "unknown").lower()
 
             devices.append(
                 DiscoveredDevice(
