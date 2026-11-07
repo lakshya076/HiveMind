@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import re
 from typing import Any, List, Optional
@@ -24,11 +25,29 @@ def validate_run_id(value: str) -> str:
     return cleaned
 
 
+def _write_private_file(path: Path, content: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"Refusing to write through symlink: {path}")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _run_file_for(run_id: str) -> Path:
     """Return the confined state file path for run_id inside ~/.hivemind/runs/."""
     clean_id = validate_run_id(run_id)
-    root = get_runs_dir().expanduser().resolve()
-    target = (root / f"{clean_id}.json").resolve()
+    runs_dir = get_runs_dir().expanduser()
+    if runs_dir.is_symlink():
+        raise ValueError(f"Refusing symlinked runs directory: {runs_dir}")
+    root = runs_dir.resolve()
+    raw_target = runs_dir / f"{clean_id}.json"
+    if raw_target.is_symlink():
+        raise ValueError(f"Refusing symlinked run state file: {raw_target}")
+    target = raw_target.resolve()
     if target.parent != root or not target.is_relative_to(root):
         raise ValueError(f"Refusing run_id {run_id!r} outside runs directory")
     return target
@@ -96,8 +115,8 @@ class RunState(BaseModel):
 
     def save(self) -> Path:
         file_path = self.path
-        file_path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
-        (get_runs_dir() / LATEST_POINTER).write_text(self.run_id, encoding="utf-8")
+        _write_private_file(file_path, self.model_dump_json(indent=2))
+        _write_private_file(get_runs_dir() / LATEST_POINTER, self.run_id)
         return file_path
 
     @classmethod
@@ -110,6 +129,8 @@ class RunState(BaseModel):
     @classmethod
     def load_latest(cls) -> "RunState":
         pointer = get_runs_dir() / LATEST_POINTER
+        if pointer.is_symlink():
+            raise ValueError(f"Refusing symlinked latest pointer: {pointer}")
         if not pointer.exists():
             raise FileNotFoundError("No HiveMind runs found. Dispatch a job first.")
         run_id = pointer.read_text(encoding="utf-8").strip()

@@ -921,9 +921,22 @@ def cancel_cmd(run_id: Optional[str], worker_choice: Optional[str], cluster: Opt
         console.print(f"[dim]Nothing to cancel: the selected strategies of run {run.run_id} have already finished.[/dim]")
         return
 
+    cancel_results: list[Optional[tuple[bool, str]]] = [None] * len(targets)
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(targets)))) as pool:
+        futures = {
+            pool.submit(cancel_worker_job, worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id): idx
+            for idx, w in enumerate(targets)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                cancel_results[idx] = future.result()
+            except Exception as exc:  # noqa: BLE001
+                cancel_results[idx] = (False, f"Cancel error: {exc}")
+
     failures = 0
-    for w in targets:
-        ok, message = cancel_worker_job(worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id)
+    for w, res in zip(targets, cancel_results):
+        ok, message = res or (False, "Cancel error")
         label = escape(f"{w.worker_id}:{w.strategy}")
         if ok:
             console.print(f"[green]Cancelled[/green] {label}")
@@ -994,14 +1007,28 @@ def logs_cmd(worker_choice: Optional[str], run_id: Optional[str], full: bool, lo
     run = refresh_run(run, workers_by_id)
     targets = [_pick_worker(run, worker_choice, run.workers)] if worker_choice else run.workers
 
+    fetched_logs: list[Optional[tuple[Optional[dict], Optional[str]]]] = [None] * len(targets)
+    if full and targets:
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(targets)))) as pool:
+            futures = {
+                pool.submit(fetch_worker_log, worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id, log_file): idx
+                for idx, w in enumerate(targets)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    fetched_logs[idx] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    fetched_logs[idx] = (None, f"Log fetch error: {exc}")
+
     failures = 0
-    for w in targets:
+    for idx, w in enumerate(targets):
         console.rule(f"{escape(w.worker_id)} · {escape(w.strategy)} · {_status_style(w.status)}")
         if w.error:
             console.print(f"[bold red]Error:[/bold red] {escape(w.error)}")
         text = w.log_tail or "(no log output reported yet)"
         if full:
-            payload, err = fetch_worker_log(worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id, log_file)
+            payload, err = fetched_logs[idx] or (None, "unknown error")
             if payload is None:
                 failures += 1
                 console.print(f"[yellow]Full {escape(log_file)} log unavailable: {escape(err or 'unknown error')}. "
