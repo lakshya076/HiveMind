@@ -58,6 +58,4 @@ Thumbs.db
 *.log
 .hivemind/
 
-# Local tests (kept out of git)
-tests/
 *.jsonl

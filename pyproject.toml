@@ -16,6 +16,12 @@ dependencies = [
     "httpx>=0.24.0",
 ]
 
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [project.scripts]
 hive = "hivemind.cli:cli"
 hivemind = "hivemind.cli:cli"
