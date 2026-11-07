@@ -56,6 +56,7 @@ class WorkerRunState(BaseModel):
     agent_engine: str
     strategy: str
     branch: str
+    base_branch: Optional[str] = None  # base the worker reports it started from
     remote_run_dir: str = ""
     status: str = "starting"
     pushed: Optional[bool] = None
@@ -72,6 +73,7 @@ class RunState(BaseModel):
     run_id: str
     prompt: str
     repo_url: str
+    base_branch: Optional[str] = None  # requested with --base; None means origin's default branch
     test_command: Optional[str] = None
     bench_command: Optional[str] = None
     model: Optional[str] = None

@@ -73,6 +73,8 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
             worker_state.test_exit_code = payload.get("test_exit_code")
             worker_state.agent_exit_code = payload.get("agent_exit_code")
             worker_state.bench_exit_code = payload.get("bench_exit_code")
+            if isinstance(payload.get("base_branch"), str):
+                worker_state.base_branch = payload["base_branch"]
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
         elif worker_state.status not in TERMINAL_STATUSES:

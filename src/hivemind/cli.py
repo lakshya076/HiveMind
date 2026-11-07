@@ -31,9 +31,10 @@ from hivemind.runner.dispatch import (
     dispatch_run,
     resolve_repo_url,
     select_workers,
+    validate_base_branch,
     validate_branch_ref,
 )
-from hivemind.runner.remote import cancel_worker_job
+from hivemind.runner.remote import LOG_FILES, cancel_worker_job, fetch_worker_log
 from hivemind.runner.state import RunState, WorkerRunState, get_runs_dir
 from hivemind.runner.status import (
     TERMINAL_STATUSES,
@@ -675,6 +676,12 @@ def check_cmd(cluster: Optional[str]):
     default=None,
     help="Engine for every strategy, overriding agent_engine from cluster.json.",
 )
+@click.option(
+    "--base",
+    "base_branch",
+    default=None,
+    help="Branch on origin to start from (default: origin's default branch). Needs hivemind-worker 0.3.0+.",
+)
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def dispatch_cmd(
     prompt: str,
@@ -685,6 +692,7 @@ def dispatch_cmd(
     bench_command: Optional[str],
     model: Optional[str],
     engine: Optional[str],
+    base_branch: Optional[str],
     cluster: Optional[str],
 ):
     """Start a parallel coding job on worker machines."""
@@ -706,6 +714,7 @@ def dispatch_cmd(
         f"[bold cyan]Dispatching Swarm Job[/bold cyan]\n"
         f"[white]{escape(prompt)}[/white]\n"
         f"[dim]Origin:[/dim] {escape(resolved_repo)}\n"
+        f"[dim]Base:[/dim] {escape(base_branch or 'default branch')}\n"
         f"[dim]Strategies ({len(slot_workers)}):[/dim] "
         f"{escape(', '.join(f'{s} on {w.id}' for w, s in zip(slot_workers, assigned_strategies)))}",
         border_style="cyan",
@@ -727,6 +736,7 @@ def dispatch_cmd(
                 test_command=test_command,
                 bench_command=bench_command,
                 model=model,
+                base_branch=base_branch,
             )
         except DispatchError as exc:
             _fail(escape(str(exc)))
@@ -764,7 +774,8 @@ def status_cmd(run_id: Optional[str], watch: bool, interval: float, cluster: Opt
             run = refresh_run(run, workers_by_id)
             progress.advance(task, advance=len(run.workers))
 
-        console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {escape(run.repo_url)}[/dim]")
+        base = f"  base {escape(run.base_branch)}" if run.base_branch else ""
+        console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {escape(run.repo_url)}{base}[/dim]")
         _print_run_table(run)
 
         all_done = all(w.status in TERMINAL_STATUSES for w in run.workers)
@@ -840,12 +851,20 @@ def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cl
         )
 
     try:
+        run_base = validate_base_branch(run.base_branch)
+    except DispatchError as exc:
+        _fail(escape(str(exc)))
+
+    try:
         local_git(
             "fetch",
             "origin",
             f"+refs/heads/{winner.branch}:refs/remotes/origin/{winner.branch}",
         )
-        base = local_base_branch()
+        if run_base:
+            # A run started from --base merges back into that branch, not the default one.
+            local_git("fetch", "origin", f"+refs/heads/{run_base}:refs/remotes/origin/{run_base}")
+        base = run_base or local_base_branch()
         has_local_base = (
             local_git("show-ref", "--verify", "--quiet", f"refs/heads/{base}", check=False).returncode == 0
         )
@@ -957,20 +976,44 @@ def runs_cmd(limit: int):
 @cli.command(name="logs")
 @click.argument("worker_choice", required=False)
 @click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--full", is_flag=True, default=False, help="Fetch the whole log (up to 1 MiB) instead of the last lines.")
+@click.option(
+    "--file",
+    "log_file",
+    type=click.Choice(LOG_FILES),
+    default="agent",
+    show_default=True,
+    help="Which log to fetch with --full.",
+)
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
-def logs_cmd(worker_choice: Optional[str], run_id: Optional[str], cluster: Optional[str]):
-    """Show the latest log lines each worker reports for a run (all strategies, or WORKER / WORKER:STRATEGY)."""
+def logs_cmd(worker_choice: Optional[str], run_id: Optional[str], full: bool, log_file: str, cluster: Optional[str]):
+    """Show the log each worker reports for a run (all strategies, or WORKER / WORKER:STRATEGY)."""
     run, workers_by_id = _run_context(run_id, cluster)
     run = refresh_run(run, workers_by_id)
     targets = [_pick_worker(run, worker_choice, run.workers)] if worker_choice else run.workers
 
+    failures = 0
     for w in targets:
         console.rule(f"{escape(w.worker_id)} · {escape(w.strategy)} · {_status_style(w.status)}")
         if w.error:
             console.print(f"[bold red]Error:[/bold red] {escape(w.error)}")
+        text = w.log_tail or "(no log output reported yet)"
+        if full:
+            payload, err = fetch_worker_log(worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id, log_file)
+            if payload is None:
+                failures += 1
+                console.print(f"[yellow]Full {escape(log_file)} log unavailable: {escape(err or 'unknown error')}. "
+                              "Showing the last lines instead.[/yellow]")
+            else:
+                if payload.get("truncated"):
+                    console.print(f"[dim]Showing the end of the {escape(log_file)} log: "
+                                  f"last {len(payload['content'].encode('utf-8'))} of {payload['size']} bytes.[/dim]")
+                text = payload.get("content") or f"(the {log_file} log is empty)"
         # Log text comes from the agent and tests: print it literally, never as markup.
-        console.print(w.log_tail or "(no log output reported yet)", markup=False, highlight=False)
+        console.print(text, markup=False, highlight=False)
     console.print()
+    if failures:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -39,10 +39,13 @@ def start_worker_job(
     test_command: Optional[str],
     bench_command: Optional[str],
     model: Optional[str],
+    base_branch: Optional[str] = None,
 ) -> WorkerRunState:
     """Dispatch task to hivemind-worker HTTP daemon. Returns immediately.
 
     ``remote_run_id`` is the run ID used on the worker (default: ``run_id``).
+    ``base_branch`` must only be sent to workers that advertise the base_branch
+    feature (see dispatch.workers_missing_feature); older workers ignore it.
     """
     remote_run_id = validate_run_id(remote_run_id or run_id)
     branch = branch_name(worker.id, strategy, run_id=run_id)
@@ -53,6 +56,7 @@ def start_worker_job(
         agent_engine=worker.agent_engine,
         strategy=strategy,
         branch=branch,
+        base_branch=base_branch,
         status="starting",
         remote_run_dir=remote_run_id,
     )
@@ -71,6 +75,8 @@ def start_worker_job(
         "test_command": test_command,
         "bench_command": bench_command,
     }
+    if base_branch:
+        payload["base_branch"] = base_branch
 
     try:
         headers = _get_auth_headers()
@@ -95,6 +101,40 @@ def start_worker_job(
         state.error = f"HTTP dispatch error: {exc}"
 
     return state
+
+
+LOG_FILES = ("agent", "test", "bench", "wrapper")
+
+
+def fetch_worker_log(
+    worker: WorkerNode, run_id: str, file: str = "agent", max_bytes: int = 1024 * 1024
+) -> tuple[Optional[dict], Optional[str]]:
+    """Fetch the end of a run's log from GET /logs/{run_id}. Returns (payload, error)."""
+    try:
+        clean_run_id = validate_run_id(run_id)
+    except ValueError as exc:
+        return None, f"Invalid run_id: {exc}"
+    url = f"http://{worker.host}:{worker.port}/logs/{clean_run_id}"
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(url, params={"file": file, "max_bytes": max_bytes}, headers=_get_auth_headers())
+    except httpx.ConnectError:
+        return None, f"Cannot connect to worker at {worker.host}:{worker.port}."
+    except Exception as exc:
+        return None, f"Log fetch error: {exc}"
+    if resp.status_code == 200:
+        return resp.json(), None
+    if resp.status_code == 401:
+        return None, "Unauthorized: Fleet API key rejected by worker."
+    detail = ""
+    try:
+        detail = str(resp.json().get("detail") or "")
+    except ValueError:
+        pass
+    if resp.status_code == 404 and detail == "Not Found":
+        # FastAPI's answer for an unknown route: a worker older than 0.3.0.
+        return None, "this worker can't send full logs (update hivemind-worker to 0.3.0 or later)"
+    return None, detail or f"HTTP {resp.status_code}: {resp.text}"
 
 
 def cancel_worker_job(worker: WorkerNode, run_id: str) -> tuple[bool, str]:

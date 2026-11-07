@@ -267,6 +267,7 @@ hive dispatch "Optimize sorting algorithm" \
 | `--bench <cmd>` | Benchmark command producing JSON output |
 | `--model <id>` | Model override for the worker engine |
 | `--engine <name>` | Engine for every strategy (`claude-code`, `claude`, `agy`, `aider`), overriding `agent_engine` from `cluster.json` for this run only |
+| `--base <branch>` | Start every strategy from this branch on origin (e.g. `develop`, `feature/login`) instead of the default branch. `hive merge` then merges into that branch. Needs hivemind-worker 0.3.0 or later on every selected worker; see below |
 
 **How strategies map to workers.** Each strategy is one slot. Strategy *n* goes to worker *n*, wrapping round when there are more strategies than workers. Slots without a name get `strategy-<n>`. A worker that gets several slots queues those beyond its `max_concurrent_runs` (default 2). Examples:
 
@@ -275,6 +276,8 @@ hive dispatch "Optimize sorting algorithm" \
 * Two slots with the same strategy name on the same worker are rejected, because both would push to the same branch.
 
 Each slot uses its own run ID on the worker (`<run_id>-<n>`), while the branch keeps the shared `<run_id>`.
+
+**Starting from another branch (`--base`).** Workers ignore dispatch fields they don't know. An older worker given `--base` would therefore quietly start from the default branch and report success. Before dispatching, `hive` checks every selected worker's `/health` for the `base_branch` feature. If any worker is older or can't be reached, it refuses with the reason and dispatches nothing. A base branch that doesn't exist on origin fails the run on the worker before the agent starts.
 
 The worker's `agent_engine` in `cluster.json` must be one the worker can launch: `claude-code` (alias `claude`), `agy` or `aider`. Anything else is rejected when the cluster is loaded.
 
@@ -316,7 +319,14 @@ hive cancel               # Cancel every strategy of the latest run that is stil
 hive cancel --worker ari:simd
 ```
 
-`hive logs` shows what the worker reports: the last 30 lines of the agent log while it runs, or of the test log when tests failed. The full logs stay on the worker in `<workspace_root>/<run_id>-<n>/.hive/`. `hive cancel` exits `1` if any worker could not cancel.
+`hive logs` shows what the worker reports: the last 30 lines of the agent log while it runs, or of the test log when tests failed. For more, use `--full`:
+
+```bash
+hive logs --full                 # whole agent log of every strategy (up to the last 1 MiB)
+hive logs ari:simd --full --file test    # agent | test | bench | wrapper
+```
+
+`--full` needs hivemind-worker 0.3.0 or later. Against an older worker it says so, shows the last lines instead, and exits `1`. All logs also stay on the worker in `<workspace_root>/<run_id>-<n>/.hive/`. `hive cancel` exits `1` if any worker could not cancel.
 
 ### Step 7: Inspect & Merge Winner (`hive merge`)
 
@@ -334,7 +344,7 @@ hive merge --worker ari:simd --yes   # Non-interactive: pick the winner and skip
 4. Previews the commits and `git diff --stat` against your base branch.
 5. After you confirm, checks out the base branch and merges with `git merge --no-ff` (message `hive: merge <branch> from <run_id>`). It does not push; run `git push` when you are happy.
 
-The base branch is the remote default (`origin/HEAD`), else `main`, else `master`, else your current non-`exp/` branch, so `develop` or `trunk` repositories work.
+The base branch is the run's `--base` branch if it had one (fetched from origin first). Otherwise it is the remote default (`origin/HEAD`), else `main`, else `master`, else your current non-`exp/` branch, so `develop` or `trunk` repositories work.
 
 `hive merge` refuses to run when:
 * the current directory's `origin` is not the run's repository (SSH and HTTPS forms of the same URL count as equal);

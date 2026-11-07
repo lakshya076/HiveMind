@@ -3,6 +3,7 @@ import re
 from typing import Optional, Sequence
 
 from hivemind.config.cluster import ClusterConfig, WorkerNode
+from hivemind.discovery.prober import SystemProber
 from hivemind.runner.remote import slugify, start_worker_job
 from hivemind.runner.state import RunState, WorkerRunState, new_run_id
 
@@ -34,6 +35,42 @@ def validate_branch_ref(branch: str) -> str:
             f"Invalid branch name {branch!r}: worker branches must be valid refs under 'exp/'."
         )
     return cleaned
+
+
+def validate_base_branch(branch: Optional[str]) -> Optional[str]:
+    """A branch to start runs from: any valid ref (it is only read, never pushed)."""
+    if branch is None or not branch.strip():
+        return None
+    cleaned = branch.strip()
+    if (
+        cleaned.startswith("-")
+        or cleaned.endswith(("/", ".lock", "."))
+        or ".." in cleaned
+        or "//" in cleaned
+        or "@{" in cleaned
+        or not _BRANCH_RE.match(cleaned)
+    ):
+        raise DispatchError(f"Invalid base branch {branch!r}.")
+    return cleaned
+
+
+def workers_missing_feature(workers: Sequence[WorkerNode], feature: str) -> list[str]:
+    """One problem line per distinct worker that doesn't advertise ``feature`` in /health.
+
+    Workers ignore dispatch fields they don't know, so sending e.g. base_branch to an
+    older worker would make it quietly start from the default branch and report success.
+    A worker that can't be checked counts as missing the feature.
+    """
+    unique = list({w.id: w for w in workers}.values())
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(unique)))) as pool:
+        probes = list(pool.map(lambda w: SystemProber.probe_daemon(w.host, w.port, 3.5), unique))
+    problems = []
+    for worker, (data, _tags, err) in zip(unique, probes):
+        if not data:
+            problems.append(f"{worker.id}: could not check ({err})")
+        elif feature not in (data.get("features") or []):
+            problems.append(f"{worker.id}: hivemind-worker {data.get('version', '?')} does not support it (needs 0.3.0 or later)")
+    return problems
 
 
 def select_workers(config: ClusterConfig, worker_ids: Optional[Sequence[str]]) -> list[WorkerNode]:
@@ -107,7 +144,9 @@ def dispatch_run(
     test_command: Optional[str] = None,
     bench_command: Optional[str] = None,
     model: Optional[str] = None,
+    base_branch: Optional[str] = None,
 ) -> RunState:
+    base_branch = validate_base_branch(base_branch)
     if not prompt.strip():
         raise DispatchError("Prompt is empty.")
     if len(prompt.strip()) > MAX_PROMPT_CHARS:
@@ -118,12 +157,19 @@ def dispatch_run(
         )
     if not workers:
         raise DispatchError("No workers selected.")
+    if base_branch:
+        problems = workers_missing_feature(workers, "base_branch")
+        if problems:
+            raise DispatchError(
+                f"Can't start from base branch {base_branch!r} on every worker:\n  " + "\n  ".join(problems)
+            )
 
     run_id = new_run_id()
     run = RunState(
         run_id=run_id,
         prompt=prompt.strip(),
         repo_url=repo_url,
+        base_branch=base_branch,
         test_command=test_command,
         bench_command=bench_command,
         model=model,
@@ -146,6 +192,7 @@ def dispatch_run(
             test_command=test_command,
             bench_command=bench_command,
             model=model,
+            base_branch=base_branch,
         )
 
     results: list[Optional[WorkerRunState]] = [None] * count
