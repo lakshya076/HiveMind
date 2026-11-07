@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
-from hivemind.config.cluster import get_hivemind_home
+from hivemind.config.cluster import get_hivemind_home, validate_worker_host
 
 LATEST_POINTER = "latest"
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -52,7 +52,7 @@ def get_runs_dir() -> Path:
 class WorkerRunState(BaseModel):
     worker_id: str
     host: str
-    port: int
+    port: int = Field(default=7422, ge=1, le=65535)
     agent_engine: str
     strategy: str
     branch: str
@@ -67,6 +67,11 @@ class WorkerRunState(BaseModel):
     bench_exit_code: Optional[int] = None
     benchmark_data: Optional[Any] = None
     log_tail: Optional[str] = None
+
+    @field_validator("host")
+    @classmethod
+    def _check_host(cls, value: str) -> str:
+        return validate_worker_host(value)
 
 
 class RunState(BaseModel):

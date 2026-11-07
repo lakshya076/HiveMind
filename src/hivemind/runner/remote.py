@@ -123,7 +123,13 @@ def fetch_worker_log(
     except Exception as exc:
         return None, f"Log fetch error: {exc}"
     if resp.status_code == 200:
-        return resp.json(), None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, "Worker returned invalid JSON for log response."
+        if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+            return None, "Worker returned malformed log payload."
+        return data, None
     if resp.status_code == 401:
         return None, "Unauthorized: Fleet API key rejected by worker."
     detail = ""
@@ -186,6 +192,8 @@ def read_worker_result(worker: WorkerNode, run_id: str) -> tuple[str, Optional[d
                 return "unknown", None, f"HTTP {resp.status_code}: {resp.text}"
 
             data = resp.json()
+            if not isinstance(data, dict):
+                return "unknown", None, "Malformed status payload from worker"
             status = str(data.get("status") or "unknown")
             log_tail = str(data.get("log_tail") or "")
             return status, data, log_tail

@@ -106,11 +106,36 @@ def test_finished_result_survives_worker_losing_the_run(fleet_key, fake_http):
     run = make_run()
     run.workers[0].status = "succeeded"
     run.workers[0].pushed = True
+    run.workers[0].log_tail = "original success log"
     fake_http.handler = lambda request: httpx.Response(404)
 
     run = refresh_run(run, {"ari": ARI})
 
     assert (run.workers[0].status, run.workers[0].pushed) == ("succeeded", True)
+    assert run.workers[0].log_tail == "original success log"
+
+
+@pytest.mark.parametrize("bad_base", ["--upload-pack=evil", "a..b", "-f"])
+def test_refresh_run_ignores_invalid_base_branch_from_worker(fleet_key, fake_http, bad_base):
+    run = make_run()
+    run.workers[0].base_branch = "main"
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "running", "base_branch": bad_base})
+
+    run = refresh_run(run, {"ari": ARI})
+
+    assert run.workers[0].base_branch == "main"
+
+
+def test_worker_run_state_rejects_url_injection_in_host():
+    with pytest.raises(ValueError, match="Invalid worker host"):
+        WorkerRunState(
+            worker_id="w1",
+            host="10.0.0.1:7422/evil#",
+            port=7422,
+            agent_engine="claude-code",
+            strategy="s1",
+            branch="exp/r1/w1-s1",
+        )
 
 
 def test_read_worker_result_rejects_traversal_without_request(fake_http):

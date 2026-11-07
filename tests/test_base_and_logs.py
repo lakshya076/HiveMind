@@ -218,3 +218,18 @@ def test_logs_full_rejects_unknown_file(fleet_key, fake_http):
     result = CliRunner().invoke(cli, ["logs", "--full", "--file", "../../worker"])
     assert result.exit_code == 2
     assert fake_http.requests == []
+
+
+def test_logs_full_handles_malformed_worker_json_gracefully(fleet_key, fake_http):
+    save_slot_run()
+
+    def handler(request):
+        if request.url.path.startswith("/logs/"):
+            return httpx.Response(200, json=["not", "a", "dict"])
+        return httpx.Response(200, json={"status": "failed", "log_tail": "fallback tail"})
+
+    fake_http.handler = handler
+    result = CliRunner().invoke(cli, ["logs", "--full"])
+    assert result.exit_code == 1
+    assert "malformed log payload" in result.output
+    assert "fallback tail" in result.output
