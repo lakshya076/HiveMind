@@ -31,7 +31,8 @@
 * [7. Security Model](#7-security-model)
 * [8. Project Documentation](#8-project-documentation)
   * [Network & Machine Setup Guide](NETWORK_SETUP.md)
-* [9. License](#9-license)
+* [9. Development & Tests](#9-development--tests)
+* [10. License](#10-license)
 
 ---
 
@@ -43,7 +44,7 @@ Instead of relying on a single AI agent working sequentially on one computer, Hi
 
 * **Master Node (Lead Architect):** Runs the `hive` CLI. Discovers fleet nodes over Tailscale or local subnets, decomposes coding goals into parallel implementation strategies, and dispatches them across workers.
 * **Worker Fleet (`hivemind-worker` Daemons):** Lightweight HTTP daemons running on port `7422` of each worker machine. Each daemon manages headless AI coding sessions (Claude Code, Antigravity CLI `agy`, Aider) in isolated Git branches, running builds, tests, and benchmark suites on local hardware.
-* **Git Origin Synchronization:** All code changes travel through isolated experimental branches (`exp/<worker>-<strategy>`) on your shared Git remote (GitHub, GitLab, or self-hosted). The master machine reviews and merges the winning solution into your main branch.
+* **Git Origin Synchronization:** All code changes travel through isolated experimental branches (`exp/<run_id>/<worker>-<strategy>`, see [Branch naming](#branch-naming)) on your shared Git remote (GitHub, GitLab, or self-hosted). The master machine reviews and merges the winning solution into your main branch.
 
 ---
 
@@ -78,20 +79,35 @@ Instead of relying on a single AI agent working sequentially on one computer, Hi
                     │                              │
                     │  a) POST /dispatch received  │
                     │  b) git clone / fetch repo   │
-                    │  c) checkout exp/<w>-<s>     │
+                    │  c) checkout exp/<r>/<w>-<s> │
                     │  d) run aider / agy / claude │
                     │  e) run --test command       │
                     │  f) git commit + git push    │
                     │  g) update status & logs     │
                     └──────────────┬───────────────┘
-                                   │ git push origin exp/<w>-<s>
+                                   │ git push origin exp/<r>/<w>-<s>
                                    ▼
                     ┌──────────────────────────────┐
                     │      Shared Git Origin       │
                     │   (GitHub / GitLab / etc.)   │
-                    │        exp/<w>-<s>           │ ◄── master fetches winner
+                    │      exp/<r>/<w>-<s>         │ ◄── master fetches winner
                     └──────────────────────────────┘
 ```
+
+### Branch naming
+
+Every worker pushes its result to its own branch:
+
+```
+exp/<run_id>/<worker>-<strategy>
+```
+
+* `<run_id>` is the run ID that `hive dispatch` creates (`YYYYMMDD-HHMMSS-<8 hex>`, UTC). Each dispatch gets its own folder, so a new run never overwrites branches from an earlier run.
+* `<worker>` is the worker ID from `cluster.json`, and `<strategy>` is the `--strategy` name (default `strategy-1`, `strategy-2`, …). Both are lowercased, and every run of characters other than letters and digits becomes a single `-`.
+
+Example: `hive dispatch "…" --workers Hermes --strategy "Quick Sort/SIMD"` pushes `exp/20261107-153012-a1b2c3d4/hermes-quick-sort-simd`.
+
+`hive merge` only accepts branches under `exp/`. A worker that reports any other branch, such as `main`, is ignored.
 
 ---
 
@@ -184,7 +200,16 @@ hive discover --local
 hive discover
 ```
 
-Probes port `7422` on candidate IPs, queries `/health` for live OS, CPU, RAM, and AI engine status, and saves selected nodes to `~/.hivemind/cluster.json`.
+Discovery works in two passes so your fleet key never reaches a device you did not choose:
+
+1. **Presence probe (no credentials).** Every candidate gets an unauthenticated `GET /` on port `7422` (change with `--port`). A device counts as a worker only if it answers as `HiveMind Worker Daemon`. The table shows `DETECTED (v<version>)` or `NOT INSTALLED / OFFLINE`.
+2. **Capability probe (with key).** Only the devices you select get the authenticated `GET /health`, which reads OS, CPU, RAM, git readiness and AI engines. Choosing `q` sends the key to nobody, and `all` selects only detected workers.
+
+Selected nodes are merged into `~/.hivemind/cluster.json`. Existing workers, `cluster_name` and `repo_url` are kept; a worker with the same ID or the same host and port is replaced.
+
+On a local scan, broadcast, multicast, loopback and link-local ARP entries are skipped. Subnets larger than 1,024 addresses (for example a `/16` VPN or Docker network) are cut down to the `/24` around your interface plus hosts already in the ARP table.
+
+`hive` reads the cluster only from `~/.hivemind/cluster.json` or the path you pass with `--cluster`. It never picks up a `cluster.json` from the current directory, so a cloned repository cannot redirect your fleet key to its own hosts. Worker hosts must be a bare IP address or hostname, and ports must be in `1–65535`.
 
 > 📘 **Network Configuration & Pre-Flight Setup:**  
 > Before running discovery, ensure your routers, firewalls, and worker machines are prepared (e.g. disabling Wi-Fi AP Isolation, opening port 7422, or joining your Tailnet).  
@@ -247,7 +272,19 @@ hive status                                   # Check latest run
 hive status --run 20261006-174456-add56543    # Check specific run
 ```
 
-Displays a live table with strategy names, branch names, execution status (`starting`, `running`, `succeeded`, `failed`), test exit codes, and output snippets.
+Polls every worker in parallel and displays a table with strategy names, branch names, execution status, test results, and output snippets. A `Benchmark` column appears when the run used `--bench` or any worker reported benchmark data.
+
+| Status | Meaning |
+|---|---|
+| `starting` | Queued on the worker or preparing the workspace |
+| `running` | Agent, tests or benchmark in progress |
+| `succeeded` | Agent finished, tests passed (or none given), branch pushed |
+| `no_changes` | Agent finished without changing any file; nothing pushed |
+| `failed` | Agent error, test failure, timeout, or `git push` failure (see Details) |
+| `cancelled` | Run was cancelled on the worker |
+| `unknown` | Worker could not be reached or rejected the fleet key |
+
+Run state is saved in `~/.hivemind/runs/<run_id>.json`. `hive status` and `hive merge` use the latest run unless you pass `--run`.
 
 ### Step 7: Inspect & Merge Winner (`hive merge`)
 
@@ -258,11 +295,18 @@ cd ~/workspace/my-project
 hive merge
 ```
 
-1. Displays completed worker runs with test outcomes.
-2. Prompts you to pick the winning worker strategy.
-3. Fetches the winning branch (`exp/<worker>-<strategy>`) from the Git remote.
-4. Previews the `git diff --stat`.
-5. Merges the branch cleanly into your current local branch.
+1. Refreshes the run and displays the worker results with test outcomes.
+2. Prompts you to pick the winning worker (default: the first `succeeded` one). Workers that are still running, ended `no_changes` or `cancelled`, or report `pushed: false` are not offered.
+3. Fetches the winning branch (`exp/<run_id>/<worker>-<strategy>`) from the Git remote.
+4. Previews the commits and `git diff --stat` against your base branch.
+5. After you confirm, checks out the base branch and merges with `git merge --no-ff` (message `hive: merge <branch> from <run_id>`). It does not push; run `git push` when you are happy.
+
+The base branch is the remote default (`origin/HEAD`), else `main`, else `master`, else your current non-`exp/` branch, so `develop` or `trunk` repositories work.
+
+`hive merge` refuses to run when:
+* the current directory's `origin` is not the run's repository (SSH and HTTPS forms of the same URL count as equal);
+* tracked files have uncommitted changes (untracked files are fine);
+* the branch is not a valid ref under `exp/`.
 
 ---
 
@@ -370,12 +414,16 @@ nssm start HiveMindWorker
 
 | Mechanism | Detail |
 |---|---|
-| **Restricted REST Endpoints** | Only 4 typed endpoints exposed (`/health`, `/dispatch`, `/status`, `/cancel`). No arbitrary shell execution endpoints. |
-| **Fleet Key Bearer Token** | All requests require `Authorization: Bearer <FLEET_KEY>` authentication. Unauthorized requests are rejected immediately with HTTP 401. Workers refuse to run without a key, and `hive` refuses to contact workers without one. |
+| **Restricted REST Endpoints** | Only typed endpoints are exposed (`/`, `/health`, `/dispatch`, `/status`, `/cancel`, `/runs`; see the [worker README](https://github.com/lakshya076/hivemind-worker#-api-endpoints)). No arbitrary shell execution endpoints. |
+| **Fleet Key Bearer Token** | Every endpoint except the `/` identity check requires `Authorization: Bearer <FLEET_KEY>`. Unauthorized requests are rejected with HTTP 401. Workers refuse to run without a key, and `hive check`, `dispatch`, `status` and `merge` exit before any network request if no key is found in `~/.hivemind/fleet.key` or `HIVEMIND_FLEET_KEY`. |
+| **Key Only Sent to Chosen Workers** | `hive discover` finds workers without credentials and sends the key only to the devices you select. `hive` never loads `cluster.json` from the current directory. |
+| **Input Validation on Both Sides** | Repo URLs that could inject git options or reach UNC network shares, path-traversal run IDs, and malformed worker hosts are rejected by `hive` before dispatch and again by the worker. Branch names reported by workers must be under `exp/`. |
+| **Safe Merge** | `hive merge` only merges into a clean working tree of the matching repository, never pushes, and asks before merging. |
 | **Private-Network Allowlist** | Workers only accept connections from loopback, private LAN ranges and Tailscale (`100.64.0.0/10`); public internet addresses get HTTP 403 (configurable via `allowed_networks`). |
 | **Browser & DNS-Rebinding Protection** | Workers serve no CORS, reject browser-originated requests (`Origin` / cross-site `Sec-Fetch-Site`), and only accept `Host` values that are IPs, the machine's own names, or its Tailscale MagicDNS name. |
 | **Workspace Isolation** | Task execution is strictly isolated inside designated workspace directories (e.g. `~/hive-workspace/<run_id>`). |
-| **Stripped Subprocess Environment** | Agent subprocesses run with a sanitized environment containing only essential system variables and AI provider keys. Personal credentials and sensitive session tokens are stripped. |
+| **Stripped Subprocess Environment** | Worker subprocesses run with a sanitized environment containing only essential system variables. AI provider keys go to the agent only, never to test, benchmark or git commands. |
+| **Agent Cannot Hijack Git** | After the agent exits, the worker removes any git hooks it planted and restores `.git/config`, then commits and pushes with hooks disabled. |
 | **Tailscale Mesh Encryption** | When communicating over Tailscale (`100.x.x.x`), all peer-to-peer traffic is end-to-end encrypted with WireGuard. |
 
 ---
@@ -388,6 +436,17 @@ nssm start HiveMindWorker
 
 ---
 
-## 9. License
+## 9. Development & Tests
+
+Tests live in `tests/` and use pytest. They run fully offline: worker HTTP calls go through an in-memory `httpx` transport, and git tests use temporary local repositories. Your real `~/.hivemind` is never touched.
+
+```bash
+uv run pytest            # creates .venv with the dev dependency group on first run
+uv run pytest -k merge   # run a subset
+```
+
+---
+
+## 10. License
 
 This project is licensed under the MIT License - see the [license.txt](license.txt) file for details.

@@ -200,7 +200,7 @@ Before adding a worker machine to your cluster, perform these 3 setup steps on e
 
 ### 1. Install Git & Configure Origin Push Auth
 
-Worker daemons push experimental branches (`exp/<worker>-<strategy>`) directly to your Git origin. The worker must have permission to push to the target repository.
+Worker daemons push experimental branches (`exp/<run_id>/<worker>-<strategy>`, see [Branch naming](README.md#branch-naming)) directly to your Git origin. The worker must have permission to push to the target repository.
 
 * **Recommended:** Configure SSH Key authentication for GitHub / GitLab on the worker:
   ```bash

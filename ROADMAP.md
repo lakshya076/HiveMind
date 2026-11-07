@@ -55,7 +55,7 @@ flowchart LR
 - [x] **Tailscale Fleet Discovery (`hive discover --tailscale`)**:
   - `TailscaleScanner` queries `tailscale status --json` for instant (<0.1s) peer lookup with OS type and Tailscale IPs.
   - Discovery mode flags: `--tailscale` / `--local` / interactive subnet scan.
-- [x] **Remote Git Branching Harness**: Workers pull the latest base branch, checkout isolated experimental branches (`exp/<worker-id>-<strategy>`), and manage workspace states.
+- [x] **Remote Git Branching Harness**: Workers pull the latest base branch, checkout isolated experimental branches (`exp/<run_id>/<worker-id>-<strategy>`), and manage workspace states.
 - [x] **Headless Agent Invocation**: Trigger headless CLI sessions (`claude -p "..."` / `agy -p "..."` / `aider --message "..."`).
 - [x] **Result Aggregation**: Collect stdout/stderr, test pass/fail exit codes, and benchmark JSON outputs back to Master node.
 - [x] **Interactive Merge Assistant (`hive merge`)**: Master CLI displays a clean summary table and prompts the user to inspect diffs and merge the winning branch into local base branch.
