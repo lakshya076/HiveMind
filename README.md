@@ -173,6 +173,8 @@ Ensure at least one supported AI coding CLI is installed and accessible on the w
 
 Both `hive` and `hivemind` can be used interchangeably.
 
+Every command exits `0` on success and `1` on failure, so they can be scripted. A missing fleet key, a missing or unreadable `cluster.json`, or an unknown run all count as failures. So do a `hive check` with any worker offline, a `hive dispatch` where any worker rejected its task (the run is still saved), and a refused `hive merge`.
+
 ### Step 1: Generate Fleet API Key (`hive keygen`)
 
 ```bash

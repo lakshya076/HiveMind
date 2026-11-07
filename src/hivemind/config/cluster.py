@@ -64,8 +64,6 @@ class WorkerNode(BaseModel):
     id: str = Field(..., min_length=1, max_length=128, description="Unique human-readable identifier for the worker")
     host: str = Field(..., description="IP address or hostname of the machine (Tailscale / LAN)")
     port: int = Field(default=7422, ge=1, le=65535, description="Worker HTTP daemon port (default: 7422)")
-    user: Optional[str] = Field(default=None, description="Optional worker username")
-    workspace_dir: str = Field(default="~/hive-workspace", description="Target workspace directory on worker")
     agent_engine: str = Field(default="claude-code", description="AI Coding CLI engine (e.g. claude-code, agy, aider)")
     capabilities: List[str] = Field(default_factory=list, description="Hardware/software tags (e.g. gpu, 32-cores)")
 

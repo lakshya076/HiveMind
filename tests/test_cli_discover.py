@@ -11,9 +11,9 @@ from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_clust
 from hivemind.discovery.scanner import DiscoveredDevice
 from hivemind.discovery.tailscale import TailscaleScanner
 
-MASTER = DiscoveredDevice(ip="100.77.177.65", hostname="Artemis", ssh_open=False, is_local_host=True)
-ARI = DiscoveredDevice(ip="100.101.58.76", hostname="ari", ssh_open=False, os_type="linux")
-STRANGER = DiscoveredDevice(ip="100.99.0.9", hostname="phone", ssh_open=False, os_type="android")
+MASTER = DiscoveredDevice(ip="100.77.177.65", hostname="Artemis", daemon_open=False, is_local_host=True)
+ARI = DiscoveredDevice(ip="100.101.58.76", hostname="ari", daemon_open=False, os_type="linux")
+STRANGER = DiscoveredDevice(ip="100.99.0.9", hostname="phone", daemon_open=False, os_type="android")
 
 WORKER_ROOT = {"name": "HiveMind Worker Daemon", "version": "0.1.0"}
 WORKER_HEALTH = {"os": "linux", "arch": "x86_64", "cpu_cores": 4, "ram_gb": 7.6, "engines": ["aider"], "git_ready": True}
@@ -22,7 +22,7 @@ WORKER_HEALTH = {"os": "linux", "arch": "x86_64", "cpu_cores": 4, "ram_gb": 7.6,
 @pytest.fixture
 def peers(monkeypatch):
     devices = [MASTER, ARI, STRANGER]
-    monkeypatch.setattr(TailscaleScanner, "discover_peers", classmethod(lambda cls, probe_ssh=False: list(devices)))
+    monkeypatch.setattr(TailscaleScanner, "discover_peers", classmethod(lambda cls: list(devices)))
     monkeypatch.setattr(TailscaleScanner, "is_available", classmethod(lambda cls: True))
     return devices
 
@@ -55,8 +55,8 @@ def test_all_with_no_detected_workers_sends_key_to_nobody(fleet_key, fake_http, 
 def test_all_selects_only_detected_workers(fleet_key, fake_http, peers):
     fake_http.handler = only_ari_is_worker
 
-    # selection, then per-device prompts: id, port, workspace, engine, capabilities
-    result = CliRunner().invoke(cli, ["discover", "--tailscale"], input="\n" * 6)
+    # selection, then per-device prompts: id, port, engine, capabilities
+    result = CliRunner().invoke(cli, ["discover", "--tailscale"], input="\n" * 5)
 
     assert result.exit_code == 0, result.output
     assert keyed_hosts(fake_http) == {ARI.ip}
@@ -71,7 +71,7 @@ def test_unreadable_cluster_file_is_never_overwritten(fleet_key, fake_http, peer
     path.write_text('{"workers": [{"id": "old", "host": "bad host"}]}', encoding="utf-8")
     before = path.read_bytes()
 
-    result = CliRunner().invoke(cli, ["discover", "--tailscale"], input="\n" * 6)
+    result = CliRunner().invoke(cli, ["discover", "--tailscale"], input="\n" * 5)
 
     assert result.exit_code == 1
     assert "Could not read" in result.output
@@ -86,7 +86,7 @@ def test_discover_keeps_existing_workers(fleet_key, fake_http, peers):
     ).save()
     fake_http.handler = only_ari_is_worker
 
-    result = CliRunner().invoke(cli, ["discover", "--tailscale"], input="\n" * 6)
+    result = CliRunner().invoke(cli, ["discover", "--tailscale"], input="\n" * 5)
 
     assert result.exit_code == 0, result.output
     saved = ClusterConfig.load()

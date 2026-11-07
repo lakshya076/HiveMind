@@ -96,9 +96,3 @@ class SystemProber:
         except Exception as exc:
             return None, [], f"Probe error: {exc}"
 
-    @classmethod
-    def probe_remote(cls, host: str, user: Optional[str] = None, port: int = 7422, timeout: float = 3.0) -> List[str]:
-        """Backward-compatible helper returning tags list."""
-        _, tags, _ = cls.probe_daemon(host, port, timeout)
-        return tags
-

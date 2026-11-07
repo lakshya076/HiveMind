@@ -1,7 +1,6 @@
 import json
 import os
 import shutil
-import socket
 import subprocess
 from typing import List, Optional
 from .scanner import DiscoveredDevice
@@ -58,7 +57,7 @@ class TailscaleScanner:
             return False
 
     @classmethod
-    def discover_peers(cls, probe_ssh: bool = True) -> List[DiscoveredDevice]:
+    def discover_peers(cls) -> List[DiscoveredDevice]:
         """Queries the local Tailscale daemon and returns all active Tailnet peers."""
         binary = cls.get_tailscale_binary()
         if not binary:
@@ -88,7 +87,7 @@ class TailscaleScanner:
                 DiscoveredDevice(
                     ip=self_v4,
                     hostname=self_data.get("HostName", "Master"),
-                    ssh_open=False,
+                    daemon_open=False,
                     is_local_host=True,
                     os_type=self_data.get("OS", "unknown").lower(),
                 )
@@ -108,22 +107,11 @@ class TailscaleScanner:
             hostname = peer_info.get("HostName", "Unknown")
             os_type = peer_info.get("OS", "unknown").lower()
 
-            # Check if Port 22 is open on the peer
-            ssh_open = False
-            if probe_ssh:
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(1.5)
-                    ssh_open = s.connect_ex((peer_v4, 22)) == 0
-                    s.close()
-                except Exception:
-                    ssh_open = False
-
             devices.append(
                 DiscoveredDevice(
                     ip=peer_v4,
                     hostname=hostname,
-                    ssh_open=ssh_open,
+                    daemon_open=False,  # discover probes the daemon itself
                     is_local_host=False,
                     os_type=os_type,
                 )

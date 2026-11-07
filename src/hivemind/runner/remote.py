@@ -50,8 +50,6 @@ def start_worker_job(
         worker_id=worker.id,
         host=worker.host,
         port=worker.port,
-        user=worker.user or "developer",
-        workspace_dir=worker.workspace_dir,
         agent_engine=worker.agent_engine,
         strategy=strategy,
         branch=branch,
@@ -72,7 +70,6 @@ def start_worker_job(
         "model": model,
         "test_command": test_command,
         "bench_command": bench_command,
-        "workspace_dir": worker.workspace_dir,
     }
 
     try:

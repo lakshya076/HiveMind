@@ -154,8 +154,6 @@ def dispatch_run(
                     worker_id=worker.id,
                     host=worker.host,
                     port=worker.port,
-                    user=worker.user,
-                    workspace_dir=worker.workspace_dir,
                     agent_engine=worker.agent_engine,
                     strategy=strategies[index],
                     branch="",

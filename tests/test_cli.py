@@ -61,7 +61,7 @@ def save_run(repo_url: str, branch: str, status: str = "succeeded", pushed=True)
         repo_url=repo_url,
         workers=[
             WorkerRunState(
-                worker_id="ari", host="10.0.0.2", port=7422, user="dev", workspace_dir="~",
+                worker_id="ari", host="10.0.0.2", port=7422,
                 agent_engine="claude-code", strategy="strategy-1", branch=branch,
                 remote_run_dir=RUN_ID, status=status, pushed=pushed,
             )
@@ -71,14 +71,14 @@ def save_run(repo_url: str, branch: str, status: str = "succeeded", pushed=True)
     return run
 
 
-def push_worker_branch(tmp_path, origin, git, branch):
+def push_worker_branch(tmp_path, origin, git, branch, message="hive: strategy-1"):
     """Simulate a worker: clone origin, commit on an exp/ branch, push it."""
     worker = tmp_path / "worker-clone"
     git(tmp_path, "clone", str(origin), str(worker))
     git(worker, "checkout", "-b", branch)
     (worker / "feature.py").write_text("FEATURE = True\n", encoding="utf-8")
     git(worker, "add", "-A")
-    git(worker, "commit", "-m", "hive: strategy-1")
+    git(worker, "commit", "-m", message)
     git(worker, "push", "origin", branch)
 
 
@@ -120,6 +120,7 @@ def test_merge_refuses_dirty_working_tree(
 
     result = runner.invoke(cli, ["merge"], input="ari\n")
 
+    assert result.exit_code == 1
     assert "uncommitted changes" in result.output
     assert not (local / "feature.py").exists()
 
@@ -135,7 +136,23 @@ def test_merge_refuses_repo_with_different_origin(
 
     result = runner.invoke(cli, ["merge"], input="ari\n")
 
+    assert result.exit_code == 1
     assert "origin does not match" in result.output
+
+
+def test_merge_preview_shows_agent_commit_messages_literally(
+    runner, fleet_key, fake_http, origin_repo, tmp_path, git, monkeypatch
+):
+    origin, local = origin_repo
+    branch = f"exp/{RUN_ID}/ari-strategy-1"
+    push_worker_branch(tmp_path, origin, git, branch, message="[link=https://evil.example]safe fix[/link]")
+    save_run(str(origin), branch)
+    fake_http.handler = worker_reports(branch)
+    monkeypatch.chdir(local)
+
+    result = runner.invoke(cli, ["merge"], input="ari\nn\n")
+
+    assert "[link=https://evil.example]" in result.output
 
 
 def test_dispatch_runs_several_strategies_on_one_worker(runner, fleet_key, fake_http):
@@ -161,7 +178,7 @@ def test_merge_picks_one_of_several_strategies_on_same_worker(
         run_id=RUN_ID, prompt="p", repo_url=str(origin),
         workers=[
             WorkerRunState(
-                worker_id="ari", host="10.0.0.2", port=7422, user="dev", workspace_dir="~",
+                worker_id="ari", host="10.0.0.2", port=7422,
                 agent_engine="aider", strategy=strategy, branch=branch,
                 remote_run_dir=f"{RUN_ID}-{i}", status="succeeded", pushed=True,
             )

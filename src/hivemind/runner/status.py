@@ -21,8 +21,6 @@ def _poll_one_worker(
             id=worker_state.worker_id,
             host=worker_state.host,
             port=worker_state.port or 7422,
-            user=worker_state.user,
-            workspace_dir=worker_state.workspace_dir,
             agent_engine=worker_state.agent_engine,
         )
     run_identifier = worker_state.remote_run_dir or run_id
@@ -72,8 +70,6 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
             worker_state.bench_exit_code = payload.get("bench_exit_code")
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
-            if payload.get("benchmark_path") is not None:
-                worker_state.benchmark_path = payload.get("benchmark_path")
         elif worker_state.status not in TERMINAL_STATUSES:
             worker_state.status = status
             if status == "unknown" and log_tail:

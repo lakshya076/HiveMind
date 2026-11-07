@@ -53,8 +53,6 @@ class WorkerRunState(BaseModel):
     worker_id: str
     host: str
     port: int
-    user: str
-    workspace_dir: str
     agent_engine: str
     strategy: str
     branch: str
@@ -67,7 +65,6 @@ class WorkerRunState(BaseModel):
     agent_exit_code: Optional[int] = None
     bench_exit_code: Optional[int] = None
     benchmark_data: Optional[Any] = None
-    benchmark_path: Optional[str] = None
     log_tail: Optional[str] = None
 
 

@@ -5,7 +5,7 @@ import secrets
 import sys
 import click
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import NoReturn, Optional
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -39,16 +39,23 @@ from hivemind.runner.status import (
 console = Console()
 
 
-def _load_config(cluster: Optional[str]) -> Optional[ClusterConfig]:
+def _fail(message: str) -> NoReturn:
+    """Print an error and exit 1, so scripts can tell failure from success."""
+    console.print(f"[bold red]Error:[/bold red] {message}")
+    sys.exit(1)
+
+
+def _load_config(cluster: Optional[str], *, required: bool = True) -> Optional[ClusterConfig]:
+    """Load the cluster file. A missing file is fatal only when ``required``; an unreadable one always is."""
+    path = cluster if cluster else get_default_cluster_path()
     try:
         return ClusterConfig.load(cluster)
     except FileNotFoundError:
-        default_path = cluster if cluster else get_default_cluster_path()
-        console.print(
-            f"[bold red]Error:[/bold red] Cluster file '{default_path}' not found. "
-            "Run [bold cyan]hive discover[/bold cyan] first."
-        )
-        return None
+        if not required:
+            return None
+        _fail(f"Cluster file '{escape(str(path))}' not found. Run [bold cyan]hive discover[/bold cyan] first.")
+    except (ValueError, OSError) as exc:  # bad JSON or a field that fails validation
+        _fail(f"Could not read cluster file '{escape(str(path))}': {escape(str(exc))}")
 
 
 def _require_fleet_key() -> bool:
@@ -62,12 +69,11 @@ def _require_fleet_key() -> bool:
     return False
 
 
-def _load_run(run_id: Optional[str]) -> Optional[RunState]:
+def _load_run(run_id: Optional[str]) -> RunState:
     try:
         return RunState.load(run_id) if run_id else RunState.load_latest()
     except (FileNotFoundError, ValueError) as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        return None
+        _fail(escape(str(exc)))
 
 
 def _status_style(status: str) -> str:
@@ -97,8 +103,6 @@ def _format_benchmark(worker: WorkerRunState) -> str:
         if len(text) > 80:
             text = text[:77] + "..."
         return escape(text) if text else "[dim]-[/dim]"
-    if worker.benchmark_path:
-        return escape(str(worker.benchmark_path))
     if worker.bench_exit_code is not None:
         if worker.bench_exit_code == 0:
             return "[green]ok[/green]"
@@ -130,7 +134,7 @@ def _worker_label(run: RunState, worker: WorkerRunState) -> str:
 
 def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     show_bench = bool(run.bench_command) or any(
-        w.benchmark_data is not None or w.bench_exit_code is not None or w.benchmark_path
+        w.benchmark_data is not None or w.bench_exit_code is not None
         for w in run.workers
     )
     table = Table(
@@ -277,7 +281,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
     # 1. Tailscale Discovery
     if mode in ("tailscale", "both"):
         with console.status("[bold green]Querying Tailscale daemon for active peers...[/bold green]"):
-            ts_peers = TailscaleScanner.discover_peers(probe_ssh=False)
+            ts_peers = TailscaleScanner.discover_peers()
             discovered.extend(ts_peers)
         source_label = "Tailscale Mesh" if mode == "tailscale" else "Tailscale + Local"
 
@@ -286,8 +290,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
         interfaces = NetworkScanner.get_local_interfaces()
         if not interfaces:
             if not discovered:
-                console.print("[bold red]Error:[/bold red] No active local network interfaces found.")
-                return
+                _fail("No active local network interfaces found.")
         else:
             chosen_iface = interfaces[0]
             if len(interfaces) > 1 and mode == "local":
@@ -430,11 +433,19 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
 
     # Build cluster config
     workers: list[WorkerNode] = []
+    used_ids: set[str] = set()
     for i, dev in enumerate(selected_devices, 1):
         default_id = f"worker-{i}" if dev.hostname in ("Unknown", "Master") else dev.hostname.split(".")[0].lower()
+        if default_id in used_ids:
+            default_id = f"{default_id}-{i}"
         console.print(f"[bold cyan]--- Device #{i} ({escape(dev.hostname)} @ {dev.ip}) ---[/bold cyan]")
 
+        # Two devices with one ID would collapse into a single worker when merged.
         worker_id = Prompt.ask("  Worker ID", default=default_id)
+        while worker_id in used_ids:
+            console.print(f"  [yellow]ID '{escape(worker_id)}' is already used by another device in this session.[/yellow]")
+            worker_id = Prompt.ask("  Worker ID", default=f"{worker_id}-{i}")
+        used_ids.add(worker_id)
         worker_port = IntPrompt.ask("  Daemon Port", default=daemon_port)
 
         # Authenticated probe: only devices the user selected ever receive the fleet key.
@@ -449,15 +460,6 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
         else:
             default_caps_str = ""
             console.print(f"  [yellow][!] Daemon Probe Warning:[/yellow] [dim]{escape(probe_err or 'No response on port ' + str(worker_port))}[/dim]")
-
-        # Suggest workspace directory based on OS
-        is_windows_peer = dev.os_type == "windows" or "os-windows" in detected_tags
-        if is_windows_peer:
-            default_ws = "C:\\hive-workspace"
-        else:
-            default_ws = "~/hive-workspace"
-
-        workspace_dir = Prompt.ask("  Workspace Directory", default=default_ws)
 
         # Auto-suggest default engine if detected
         default_engine = "aider" if "engine:aider" in detected_tags else ("agy" if "engine:agy" in detected_tags else "claude-code")
@@ -477,7 +479,6 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
             id=worker_id,
             host=dev.ip,
             port=worker_port,
-            workspace_dir=workspace_dir,
             agent_engine=agent_engine,
             capabilities=caps
         ))
@@ -501,28 +502,21 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file (default: ~/.hivemind/cluster.json).")
 def list_cmd(cluster: Optional[str]):
     """List all configured worker nodes in the cluster."""
-    try:
-        config = ClusterConfig.load(cluster)
-    except FileNotFoundError:
-        default_path = cluster if cluster else get_default_cluster_path()
-        console.print(f"[bold red]Error:[/bold red] Cluster file '{default_path}' not found. Run [bold cyan]hive discover[/bold cyan] first.")
-        return
+    config = _load_config(cluster)
 
-    table = Table(title=f"HiveMind Cluster: {config.cluster_name} ({len(config.workers)} Workers)", border_style="cyan")
+    table = Table(title=f"HiveMind Cluster: {escape(config.cluster_name)} ({len(config.workers)} Workers)", border_style="cyan")
     table.add_column("Worker ID", style="bold white")
     table.add_column("Daemon Address", style="green")
-    table.add_column("Workspace Root", style="yellow")
     table.add_column("Engine", style="magenta")
     table.add_column("Capabilities", style="blue")
 
     for worker in config.workers:
         caps_str = ", ".join(worker.capabilities) if worker.capabilities else "none"
         table.add_row(
-            worker.id,
+            escape(worker.id),
             f"{worker.host}:{worker.port}",
-            worker.workspace_dir,
             worker.agent_engine,
-            caps_str
+            escape(caps_str),
         )
 
     console.print()
@@ -541,11 +535,9 @@ def check_cmd(cluster: Optional[str]):
     if not _require_fleet_key():
         sys.exit(1)
     config = _load_config(cluster)
-    if config is None:
-        return
 
     console.print(Panel.fit(
-        f"[bold cyan]Checking HiveMind Cluster:[/bold cyan] {config.cluster_name} ({len(config.workers)} nodes)",
+        f"[bold cyan]Checking HiveMind Cluster:[/bold cyan] {escape(config.cluster_name)} ({len(config.workers)} nodes)",
         border_style="cyan"
     ))
 
@@ -577,8 +569,11 @@ def check_cmd(cluster: Optional[str]):
                         probe_results[idx] = (None, [], str(exc))
                     progress.advance(task)
 
+    not_ready = 0
     for idx, worker in enumerate(config.workers):
         h_data, tags, err = probe_results[idx] or (None, [], "refused")
+        if not h_data:
+            not_ready += 1
 
         if h_data:
             daemon_status = "[bold green]ONLINE (Ready)[/bold green]" if h_data.get("status") == "ready" else "[bold yellow]BUSY[/bold yellow]"
@@ -608,6 +603,8 @@ def check_cmd(cluster: Optional[str]):
         )
 
     console.print("\n", table, "\n")
+    if not_ready:
+        sys.exit(1)
 
 
 @cli.command(name="dispatch")
@@ -633,17 +630,14 @@ def dispatch_cmd(
     if not _require_fleet_key():
         sys.exit(1)
     config = _load_config(cluster)
-    if config is None:
-        return
 
-    worker_ids = [wid.strip() for wid in worker_ids_csv.split(",")] if worker_ids_csv else None
+    worker_ids =[wid.strip() for wid in worker_ids_csv.split(",")] if worker_ids_csv else None
     try:
         selected = select_workers(config, worker_ids)
         slot_workers, assigned_strategies = assign_strategies(selected, strategies)
         resolved_repo = resolve_repo_url(config, repo_url)
     except DispatchError as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        return
+        _fail(escape(str(exc)))
 
     console.print(Panel.fit(
         f"[bold cyan]Dispatching Swarm Job[/bold cyan]\n"
@@ -672,8 +666,7 @@ def dispatch_cmd(
                 model=model,
             )
         except DispatchError as exc:
-            console.print(f"[bold red]Error:[/bold red] {exc}")
-            return
+            _fail(escape(str(exc)))
         progress.advance(task, advance=len(slot_workers))
 
     console.print(Panel.fit(
@@ -683,6 +676,9 @@ def dispatch_cmd(
         border_style="green",
     ))
     _print_run_table(run)
+    rejected = [w for w in run.workers if w.status == "failed"]
+    if rejected:
+        _fail(f"{len(rejected)} of {len(run.workers)} strategies could not be dispatched (see Details). The run is saved.")
 
 
 @cli.command(name="status")
@@ -693,14 +689,7 @@ def status_cmd(run_id: Optional[str], cluster: Optional[str]):
     if not _require_fleet_key():
         sys.exit(1)
     run = _load_run(run_id)
-    if run is None:
-        return
-
-    config = None
-    try:
-        config = ClusterConfig.load(cluster)
-    except FileNotFoundError:
-        pass
+    config = _load_config(cluster, required=False)
     workers_by_id = {w.id: w for w in config.workers} if config else {}
 
     with Progress(
@@ -728,14 +717,7 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
     if not _require_fleet_key():
         sys.exit(1)
     run = _load_run(run_id)
-    if run is None:
-        return
-
-    config = None
-    try:
-        config = ClusterConfig.load(cluster)
-    except FileNotFoundError:
-        pass
+    config = _load_config(cluster, required=False)
     workers_by_id = {w.id: w for w in config.workers} if config else {}
     run = refresh_run(run, workers_by_id)
     _print_run_table(run, title=f"Pick a winner for {run.run_id}")
@@ -748,8 +730,7 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
         and not (w.status == "failed" and w.pushed is not True and w.agent_exit_code is None)
     ]
     if not finished:
-        console.print("[bold red]Error:[/bold red] No worker branches are available to merge yet.")
-        return
+        _fail("No worker branches are available to merge yet.")
 
     default_w = next((w for w in finished if w.status == "succeeded"), finished[0])
     choice = Prompt.ask(
@@ -758,37 +739,32 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
     )
     matches = [w for w in finished if choice in (_worker_label(run, w), f"{w.worker_id}:{w.strategy}")]
     if len(matches) != 1:
-        console.print(f"[bold red]Error:[/bold red] Unknown worker '{escape(choice)}'.")
-        return
+        _fail(f"Unknown worker '{escape(choice)}'.")
     winner = matches[0]
 
     try:
         validate_branch_ref(winner.branch)
     except DispatchError as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        return
+        _fail(escape(str(exc)))
 
     origin = local_repo_origin()
     if origin is None:
-        console.print(
-            "[bold red]Error:[/bold red] Run hive merge from a clone of the shared origin.\n"
-            f"[dim]Expected repo:[/dim] {run.repo_url}"
+        _fail(
+            "Run hive merge from a clone of the shared origin.\n"
+            f"[dim]Expected repo:[/dim] {escape(run.repo_url)}"
         )
-        return
     if normalize_git_url(origin) != normalize_git_url(run.repo_url):
-        console.print(
-            "[bold red]Error:[/bold red] This directory's origin does not match the run.\n"
-            f"  local: {origin}\n"
-            f"  run:   {run.repo_url}"
+        _fail(
+            "This directory's origin does not match the run.\n"
+            f"  local: {escape(origin)}\n"
+            f"  run:   {escape(run.repo_url)}"
         )
-        return
 
     if local_working_tree_dirty():
-        console.print(
-            "[bold red]Error:[/bold red] Local working tree has uncommitted changes. "
+        _fail(
+            "Local working tree has uncommitted changes. "
             "Commit or stash them before running [bold white]hive merge[/bold white]."
         )
-        return
 
     try:
         local_git(
@@ -804,11 +780,11 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
         log = local_git("log", "--oneline", f"{compare_base}..origin/{winner.branch}", check=False)
         diff = local_git("diff", "--stat", f"{compare_base}...origin/{winner.branch}", check=False)
     except RuntimeError as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        return
+        _fail(escape(str(exc)))
 
     console.print(Panel(
-        (log.stdout or "[dim]no commits on branch[/dim]") + "\n" + (diff.stdout or ""),
+        # Commit messages come from the worker's agent: never let them render as markup.
+        (escape(log.stdout) if log.stdout else "[dim]no commits on branch[/dim]") + "\n" + escape(diff.stdout or ""),
         title=f"origin/{winner.branch} vs {compare_base}",
         border_style="blue",
     ))
@@ -824,8 +800,10 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
             local_git("checkout", "-B", base, f"origin/{base}")
         local_git("merge", "--no-ff", f"origin/{winner.branch}", "-m", f"hive: merge {winner.branch} from {run.run_id}")
     except RuntimeError as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        return
+        _fail(
+            f"{escape(str(exc))}\n"
+            "If the merge stopped on conflicts, resolve them and commit, or run [bold white]git merge --abort[/bold white]."
+        )
 
     console.print(Panel.fit(
         f"[bold green]Merged[/bold green] [white]{winner.branch}[/white] into local [white]{base}[/white].\n"

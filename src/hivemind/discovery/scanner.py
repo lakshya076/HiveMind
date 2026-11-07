@@ -15,7 +15,7 @@ _MAC_RE = re.compile(r"\b([0-9a-fA-F]{1,2}(?:[:-][0-9a-fA-F]{1,2}){5})\b")
 class DiscoveredDevice:
     ip: str
     hostname: str
-    ssh_open: bool
+    daemon_open: bool  # worker daemon port answered a TCP connect
     is_local_host: bool = False
     mac_address: Optional[str] = None
     response_time_ms: Optional[float] = None
@@ -112,11 +112,6 @@ class NetworkScanner:
         except Exception:
             return False
 
-    @classmethod
-    def check_ssh_port(cls, ip: str, port: int = 22, timeout: float = 2.5) -> bool:
-        """Backward-compatible wrapper around check_tcp_port."""
-        return cls.check_tcp_port(ip, port=port, timeout=timeout)
-
     @staticmethod
     def resolve_hostname(ip: str, timeout: float = 0.5) -> str:
         """Attempts to resolve the hostname via reverse DNS without calling socket.setdefaulttimeout."""
@@ -145,7 +140,7 @@ class NetworkScanner:
             return DiscoveredDevice(
                 ip=ip,
                 hostname=hostname,
-                ssh_open=daemon_open,
+                daemon_open=daemon_open,
                 is_local_host=is_local,
                 mac_address=mac,
             )
@@ -220,5 +215,5 @@ class NetworkScanner:
                     pass
 
         # Sort: Local host first, then devices with open worker port, then IP order
-        discovered.sort(key=lambda d: (not d.is_local_host, not d.ssh_open, ipaddress.IPv4Address(d.ip)))
+        discovered.sort(key=lambda d: (not d.is_local_host, not d.daemon_open, ipaddress.IPv4Address(d.ip)))
         return discovered

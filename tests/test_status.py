@@ -22,8 +22,6 @@ def make_run() -> RunState:
                 worker_id="ari",
                 host=ARI.host,
                 port=ARI.port,
-                user="dev",
-                workspace_dir="~",
                 agent_engine="claude-code",
                 strategy="strategy-1",
                 branch=BRANCH,
