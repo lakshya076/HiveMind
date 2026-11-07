@@ -763,6 +763,7 @@ def status_cmd(run_id: Optional[str], watch: bool, interval: float, cluster: Opt
     """Show live status of a dispatched run by reading result.json from workers."""
     run, workers_by_id = _run_context(run_id, cluster)
 
+    first_poll = True
     while True:
         with Progress(
             SpinnerColumn(),
@@ -771,7 +772,8 @@ def status_cmd(run_id: Optional[str], watch: bool, interval: float, cluster: Opt
             transient=True,
         ) as progress:
             task = progress.add_task(f"Polling workers for run {run.run_id}...", total=len(run.workers))
-            run = refresh_run(run, workers_by_id)
+            run = refresh_run(run, workers_by_id, skip_terminal=not first_poll)
+            first_poll = False
             progress.advance(task, advance=len(run.workers))
 
         base = f"  base {escape(run.base_branch)}" if run.base_branch else ""

@@ -138,6 +138,49 @@ def test_worker_run_state_rejects_url_injection_in_host():
         )
 
 
+def test_refresh_run_skip_terminal_avoids_polling_finished_workers(fleet_key, fake_http):
+    w_done = WorkerRunState(
+        worker_id="ari",
+        host=ARI.host,
+        port=ARI.port,
+        agent_engine="claude-code",
+        strategy="s1",
+        branch=BRANCH,
+        remote_run_dir=f"{RUN_ID}-1",
+        status="succeeded",
+        log_tail="done",
+    )
+    w_running = WorkerRunState(
+        worker_id="hermes",
+        host="10.0.0.3",
+        port=7422,
+        agent_engine="claude-code",
+        strategy="s2",
+        branch=f"exp/{RUN_ID}/hermes-s2",
+        remote_run_dir=f"{RUN_ID}-2",
+        status="running",
+    )
+    run = RunState(run_id=RUN_ID, prompt="p", repo_url="r", workers=[w_done, w_running])
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "succeeded", "log_tail": "finished s2"})
+
+    run = refresh_run(run, {"ari": ARI}, skip_terminal=True)
+
+    assert len(fake_http.requests) == 1
+    assert fake_http.requests[0].url.host == "10.0.0.3"
+    assert [w.status for w in run.workers] == ["succeeded", "succeeded"]
+
+
+def test_refresh_run_never_regresses_terminal_status_to_running(fleet_key, fake_http):
+    run = make_run()
+    run.workers[0].status = "succeeded"
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "running"})
+
+    run = refresh_run(run, {"ari": ARI})
+
+    assert run.workers[0].status == "succeeded"
+
+
+
 def test_read_worker_result_rejects_traversal_without_request(fake_http):
     status, payload, tail = read_worker_result(ARI, "../../health")
     assert status == "unknown" and payload is None and "Invalid run_id" in tail
