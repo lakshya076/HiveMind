@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import secrets
 import sys
@@ -193,15 +194,22 @@ def keygen_cmd(force: bool):
 
     new_key = f"hive-key-{secrets.token_hex(20)}"
     get_hivemind_home().mkdir(parents=True, exist_ok=True)
-    key_file.write_text(new_key, encoding="utf-8")
+    # Owner-only (0600) on POSIX; on Windows the user-profile ACL already restricts it.
+    fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(new_key)
+    try:
+        os.chmod(key_file, 0o600)  # also tighten a key file that already existed
+    except OSError:
+        pass
 
     console.print(Panel.fit(
         f"[bold green][OK] New Fleet API Key Generated Successfully![/bold green]\n\n"
         f"[bold white]Key:[/bold white] [bold cyan]{new_key}[/bold cyan]\n\n"
         f"[dim]Saved to:[/dim] [white]{key_file}[/white]\n\n"
         f"[bold yellow]Next Step on Worker Nodes:[/bold yellow]\n"
-        f"Run on each worker machine to authorize it:\n"
-        f"  [bold white]hivemind-worker start --key {new_key} --save[/bold white]",
+        f"Run on each worker machine and paste the key at the hidden prompt:\n"
+        f"  [bold white]hivemind-worker key set[/bold white]",
         title="HiveMind Fleet Key",
         border_style="green"
     ))
@@ -221,10 +229,15 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
     target_path = Path(output) if output else get_default_cluster_path()
     existing_config: Optional[ClusterConfig] = None
     if target_path.exists():
+        # Never continue on an unreadable file: saving would overwrite every existing worker.
         try:
             existing_config = ClusterConfig.load(target_path)
-        except Exception:
-            existing_config = None
+        except Exception as exc:
+            console.print(
+                f"[bold red]Error:[/bold red] Could not read {escape(str(target_path))}: {escape(str(exc))}\n"
+                "Fix or remove the file, then run [bold cyan]hive discover[/bold cyan] again."
+            )
+            sys.exit(1)
 
     ts_available = TailscaleScanner.is_available()
 
@@ -377,9 +390,16 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
 
     selected_devices: list[DiscoveredDevice] = []
     if selection_str.strip().lower() == "all":
-        # Default to selecting remote devices with active worker daemons
-        ready = [d for d in discovered if not d.is_local_host and presence_map.get(d.ip, (None, None))[0] is not None]
-        selected_devices = ready if ready else [d for d in discovered if not d.is_local_host]
+        # Only detected workers: "all" must never send the fleet key to unknown devices.
+        selected_devices = [
+            d for d in discovered
+            if not d.is_local_host and presence_map.get(d.ip, (None, None))[0] is not None
+        ]
+        if not selected_devices:
+            console.print(
+                "[yellow]No HiveMind workers were detected. "
+                "To add a device anyway, enter its number explicitly.[/yellow]"
+            )
     else:
         for part in selection_str.split(","):
             part = part.strip()

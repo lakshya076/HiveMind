@@ -178,7 +178,7 @@ Both `hive` and `hivemind` can be used interchangeably.
 ```bash
 hive keygen
 ```
-Creates a new fleet authorization token and saves it to `~/.hivemind/fleet.key`.
+Creates a new fleet authorization token and saves it to `~/.hivemind/fleet.key` (owner-only on Linux/macOS). An existing key is shown, not replaced, unless you pass `--force`. On each worker, run `hivemind-worker key set` and paste the key at the hidden prompt.
 
 ### Step 2: Discover Devices (`hive discover`)
 
@@ -205,7 +205,7 @@ Discovery works in two passes so your fleet key never reaches a device you did n
 1. **Presence probe (no credentials).** Every candidate gets an unauthenticated `GET /` on port `7422` (change with `--port`). A device counts as a worker only if it answers as `HiveMind Worker Daemon`. The table shows `DETECTED (v<version>)` or `NOT INSTALLED / OFFLINE`.
 2. **Capability probe (with key).** Only the devices you select get the authenticated `GET /health`, which reads OS, CPU, RAM, git readiness and AI engines. Choosing `q` sends the key to nobody, and `all` selects only detected workers.
 
-Selected nodes are merged into `~/.hivemind/cluster.json`. Existing workers, `cluster_name` and `repo_url` are kept; a worker with the same ID or the same host and port is replaced.
+Selected nodes are merged into `~/.hivemind/cluster.json`. Existing workers, `cluster_name` and `repo_url` are kept; a worker with the same ID or the same host and port is replaced. If the existing file cannot be read, `discover` stops with an error instead of overwriting it.
 
 On a local scan, broadcast, multicast, loopback and link-local ARP entries are skipped. Subnets larger than 1,024 addresses (for example a `/16` VPN or Docker network) are cut down to the `/24` around your interface plus hosts already in the ARP table.
 
