@@ -85,14 +85,32 @@ def test_terminal_status_survives_offline_worker(fleet_key, fake_http):
     assert run.workers[0].status == "succeeded"
 
 
-@pytest.mark.parametrize(
-    "code, expected_status, expected_tail",
-    [(404, "running", ""), (401, "unknown", "Authentication failed (invalid fleet key)")],
-)
-def test_read_worker_result_http_errors(fleet_key, fake_http, code, expected_status, expected_tail):
-    fake_http.handler = lambda request: httpx.Response(code)
-    status, payload, tail = read_worker_result(ARI, RUN_ID)
-    assert (status, payload, tail) == (expected_status, None, expected_tail)
+def test_read_worker_result_auth_failure(fleet_key, fake_http):
+    fake_http.handler = lambda request: httpx.Response(401)
+    assert read_worker_result(ARI, RUN_ID) == ("unknown", None, "Authentication failed (invalid fleet key)")
+
+
+def test_run_the_worker_lost_ends_failed_not_running_forever(fleet_key, fake_http):
+    # The worker records a run before /dispatch returns, so 404 means it lost it
+    # (reinstall, new workspace_root). It used to show "running" forever.
+    fake_http.handler = lambda request: httpx.Response(404)
+
+    run = refresh_run(make_run(), {"ari": ARI})
+
+    worker = run.workers[0]
+    assert worker.status == "failed"
+    assert "has no record of run" in worker.error
+
+
+def test_finished_result_survives_worker_losing_the_run(fleet_key, fake_http):
+    run = make_run()
+    run.workers[0].status = "succeeded"
+    run.workers[0].pushed = True
+    fake_http.handler = lambda request: httpx.Response(404)
+
+    run = refresh_run(run, {"ari": ARI})
+
+    assert (run.workers[0].status, run.workers[0].pushed) == ("succeeded", True)
 
 
 def test_read_worker_result_rejects_traversal_without_request(fake_http):

@@ -450,14 +450,17 @@ nssm start HiveMindWorker
 | **Restricted REST Endpoints** | Only typed endpoints are exposed (`/`, `/health`, `/dispatch`, `/status`, `/cancel`, `/runs`; see the [worker README](https://github.com/lakshya076/hivemind-worker#-api-endpoints)). No arbitrary shell execution endpoints. |
 | **Fleet Key Bearer Token** | Every endpoint except the `/` identity check requires `Authorization: Bearer <FLEET_KEY>`. Unauthorized requests are rejected with HTTP 401. Workers refuse to run without a key, and `hive check`, `dispatch`, `status` and `merge` exit before any network request if no key is found in `~/.hivemind/fleet.key` or `HIVEMIND_FLEET_KEY`. |
 | **Key Only Sent to Chosen Workers** | `hive discover` finds workers without credentials and sends the key only to the devices you select. `hive` never loads `cluster.json` from the current directory. |
-| **Input Validation on Both Sides** | Repo URLs that could inject git options or reach UNC network shares, path-traversal run IDs, and malformed worker hosts are rejected by `hive` before dispatch and again by the worker. Branch names reported by workers must be under `exp/`. |
+| **Input Validation on Both Sides** | Repo URLs that could inject git options or reach UNC network shares, path-traversal run IDs, unsupported engines, model names that could be read as flags, and oversized prompts are rejected by `hive` before dispatch and again by the worker (HTTP 422). Branches must be under `exp/` on both sides: workers only ever force-push `exp/` branches, and `hive merge` only merges them. |
 | **Safe Merge** | `hive merge` only merges into a clean working tree of the matching repository, never pushes, and asks before merging. |
 | **Private-Network Allowlist** | Workers only accept connections from loopback, private LAN ranges and Tailscale (`100.64.0.0/10`); public internet addresses get HTTP 403 (configurable via `allowed_networks`). |
 | **Browser & DNS-Rebinding Protection** | Workers serve no CORS, reject browser-originated requests (`Origin` / cross-site `Sec-Fetch-Site`), and only accept `Host` values that are IPs, the machine's own names, or its Tailscale MagicDNS name. |
-| **Workspace Isolation** | Task execution is strictly isolated inside designated workspace directories (e.g. `~/hive-workspace/<run_id>`). |
-| **Stripped Subprocess Environment** | Worker subprocesses run with a sanitized environment containing only essential system variables. AI provider keys go to the agent only, never to test, benchmark or git commands. |
+| **Workspace Confinement** | Each run gets its own directory (`~/hive-workspace/<run_id>`) that the run ID cannot escape. This is not a sandbox; see the warning below. |
+| **Stripped Subprocess Environment** | Worker subprocesses run with only essential system variables. AI provider keys are put in the agent's environment only, not in test, benchmark or git commands. This keeps them out of environment dumps; it is not isolation. |
 | **Agent Cannot Hijack Git** | After the agent exits, the worker removes any git hooks it planted and restores `.git/config`, then commits and pushes with hooks disabled. |
 | **Tailscale Mesh Encryption** | When communicating over Tailscale (`100.x.x.x`), all peer-to-peer traffic is end-to-end encrypted with WireGuard. |
+
+> [!WARNING]
+> **`--test` and `--bench` run agent-written code on the worker, as the worker's user.** The agent edits the repository, then the worker runs its tests. Anything that steers the agent can therefore run code there: your prompt, or text in the repository (prompt injection). That code can read the worker user's files, including its git push key, `~/.env`, and `~/.hivemind/worker.json`. The last one holds the **fleet key, which controls every worker**. Until container sandboxing lands (Phase 4), run each worker as a dedicated OS user with a deploy key limited to the fleet's repositories, and only dispatch repositories you trust. See the [worker trust model](https://github.com/lakshya076/hivemind-worker#%EF%B8%8F-trust-model-tests-run-agent-written-code-as-the-workers-user).
 
 ---
 

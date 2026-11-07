@@ -225,6 +225,27 @@ def test_merge_non_interactive(runner, fleet_key, fake_http, origin_repo, tmp_pa
     assert (local / "f.py").exists()
 
 
+def test_check_treats_claude_alias_as_claude_code(runner, fleet_key, fake_http):
+    ClusterConfig(workers=[WorkerNode(id="ari", host="10.0.0.2", agent_engine="claude")]).save()
+    fake_http.handler = lambda request: httpx.Response(
+        200, json={"status": "ready", "engines": ["claude-code"], "version": "0.2.0", "git_ready": True}
+    )
+    result = runner.invoke(cli, ["check"])
+    assert result.exit_code == 0, result.output
+    assert "avail:" not in result.output  # shown as available, not as a mismatch
+
+
+def test_status_watch_ends_when_worker_lost_the_run(runner, fleet_key, fake_http, monkeypatch):
+    save_run(slot("simd", 1))
+    fake_http.handler = lambda request: httpx.Response(404)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: pytest.fail("watch should not keep polling a lost run"))
+
+    result = runner.invoke(cli, ["status", "--watch"])
+
+    assert result.exit_code == 0, result.output
+    assert "has no record of run" in result.output
+
+
 def test_check_warns_on_mixed_worker_versions(runner, fleet_key, fake_http):
     ClusterConfig(workers=[WorkerNode(id="ari", host="10.0.0.2"), WorkerNode(id="hermes", host="10.0.0.3")]).save()
     versions = {"10.0.0.2": "0.1.0", "10.0.0.3": "0.2.0"}

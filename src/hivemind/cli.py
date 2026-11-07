@@ -626,7 +626,8 @@ def check_cmd(cluster: Optional[str]):
             git_status = "[bold green]YES[/bold green]" if h_data.get("git_ready") else "[bold red]NO (missing)[/bold red]"
 
             engines = h_data.get("engines", [])
-            if worker.agent_engine in engines:
+            # Workers report Claude Code as "claude-code"; "claude" is the cluster.json alias.
+            if ("claude-code" if worker.agent_engine == "claude" else worker.agent_engine) in engines:
                 engine_status = f"[bold green]{escape(worker.agent_engine)}[/bold green]"
             elif engines:
                 engine_status = f"[yellow]{escape(worker.agent_engine)} (avail: {escape(', '.join(engines))})[/yellow]"

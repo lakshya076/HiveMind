@@ -7,6 +7,10 @@ from hivemind.runner.remote import slugify, start_worker_job
 from hivemind.runner.state import RunState, WorkerRunState, new_run_id
 
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
+# Same limits the worker enforces at /dispatch (hivemind-worker models.py / agent.py),
+# checked here so a mistake fails before any worker is contacted.
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}$")
+MAX_PROMPT_CHARS = 200_000
 
 
 class DispatchError(ValueError):
@@ -106,6 +110,12 @@ def dispatch_run(
 ) -> RunState:
     if not prompt.strip():
         raise DispatchError("Prompt is empty.")
+    if len(prompt.strip()) > MAX_PROMPT_CHARS:
+        raise DispatchError(f"Prompt is {len(prompt.strip())} characters; workers accept at most {MAX_PROMPT_CHARS}.")
+    if model is not None and not _MODEL_RE.match(model):
+        raise DispatchError(
+            f"Invalid model name {model!r}: use letters, digits and ._:/@+- only, starting with a letter or digit."
+        )
     if not workers:
         raise DispatchError("No workers selected.")
 

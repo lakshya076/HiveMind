@@ -194,6 +194,19 @@ def test_dispatch_run_records_rejections_and_offline_workers(fleet_key, fake_htt
     assert hermes.status == "failed" and "Cannot connect" in hermes.error
 
 
+@pytest.mark.parametrize("model", ["--dangerously-skip-permissions", "gpt 4", "a;b", ""])
+def test_dispatch_run_rejects_models_the_worker_would_refuse(fake_http, model):
+    with pytest.raises(DispatchError, match="Invalid model"):
+        dispatch_run(CLUSTER, "p", repo_url="r", workers=[ARI], strategies=["a"], model=model)
+    assert fake_http.requests == []
+
+
+def test_dispatch_run_rejects_prompt_over_worker_limit(fake_http):
+    with pytest.raises(DispatchError, match="at most 200000"):
+        dispatch_run(CLUSTER, "x" * 200_001, repo_url="r", workers=[ARI], strategies=["a"])
+    assert fake_http.requests == []
+
+
 def test_dispatch_run_rejects_empty_prompt(fake_http):
     with pytest.raises(DispatchError):
         dispatch_run(CLUSTER, "   ", repo_url="r", workers=[ARI], strategies=["a"])

@@ -76,8 +76,10 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
         elif worker_state.status not in TERMINAL_STATUSES:
+            # Only unfinished runs change: a finished result is never overwritten by a
+            # worker that is offline or has since lost the run.
             worker_state.status = status
-            if status == "unknown" and log_tail:
+            if status in ("unknown", "failed") and log_tail:
                 worker_state.error = log_tail
 
     run.save()

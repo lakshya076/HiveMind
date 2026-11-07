@@ -133,7 +133,13 @@ def read_worker_result(worker: WorkerNode, run_id: str) -> tuple[str, Optional[d
         with httpx.Client(timeout=6.0) as client:
             resp = client.get(url, headers=headers)
             if resp.status_code == 404:
-                return "running", None, ""
+                # The worker records a run before /dispatch returns, so a 404 means it has lost
+                # the run (reinstalled, workspace_root changed). Reporting "running" made
+                # `hive status --watch` wait forever.
+                return "failed", None, (
+                    f"Worker {worker.id} has no record of run {clean_run_id} "
+                    "(was it reinstalled, or its workspace_root changed?)"
+                )
             if resp.status_code == 401:
                 return "unknown", None, "Authentication failed (invalid fleet key)"
             if resp.status_code != 200:
