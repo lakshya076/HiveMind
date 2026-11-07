@@ -10,21 +10,26 @@ from hivemind.runner.state import RunState, WorkerRunState
 TERMINAL_STATUSES = {"succeeded", "failed", "no_changes", "cancelled"}
 
 
+def worker_node_for(worker_state: WorkerRunState, workers_by_id: dict[str, WorkerNode]) -> WorkerNode:
+    """The cluster's current entry for this worker, else the address saved with the run."""
+    worker = workers_by_id.get(worker_state.worker_id)
+    if worker is not None:
+        return worker
+    return WorkerNode(
+        id=worker_state.worker_id,
+        host=worker_state.host,
+        port=worker_state.port or 7422,
+        agent_engine=worker_state.agent_engine,
+    )
+
+
 def _poll_one_worker(
     worker_state: WorkerRunState,
     run_id: str,
     workers_by_id: dict[str, WorkerNode],
 ) -> tuple[str, Optional[dict], str]:
-    worker = workers_by_id.get(worker_state.worker_id)
-    if worker is None:
-        worker = WorkerNode(
-            id=worker_state.worker_id,
-            host=worker_state.host,
-            port=worker_state.port or 7422,
-            agent_engine=worker_state.agent_engine,
-        )
     run_identifier = worker_state.remote_run_dir or run_id
-    return read_worker_result(worker, run_identifier)
+    return read_worker_result(worker_node_for(worker_state, workers_by_id), run_identifier)
 
 
 def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState:

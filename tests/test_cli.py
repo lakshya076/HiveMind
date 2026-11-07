@@ -199,7 +199,8 @@ def test_merge_picks_one_of_several_strategies_on_same_worker(
 
     # A bare worker id is ambiguous when that worker ran several strategies.
     result = runner.invoke(cli, ["merge"], input="ari\n")
-    assert "Unknown worker 'ari'" in result.output
+    assert result.exit_code == 1
+    assert "ran several strategies" in result.output
 
 
 @pytest.mark.parametrize("status, pushed", [("no_changes", False), ("cancelled", None), ("succeeded", False)])

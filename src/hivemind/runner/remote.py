@@ -97,6 +97,29 @@ def start_worker_job(
     return state
 
 
+def cancel_worker_job(worker: WorkerNode, run_id: str) -> tuple[bool, str]:
+    """Ask the worker to cancel run_id. Returns (cancelled, message)."""
+    try:
+        clean_run_id = validate_run_id(run_id)
+    except ValueError as exc:
+        return False, f"Invalid run_id: {exc}"
+    url = f"http://{worker.host}:{worker.port}/cancel/{clean_run_id}"
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.delete(url, headers=_get_auth_headers())
+    except httpx.ConnectError:
+        return False, f"Cannot connect to worker at {worker.host}:{worker.port}."
+    except Exception as exc:
+        return False, f"Cancel error: {exc}"
+    if resp.status_code == 200:
+        return True, "cancelled"
+    if resp.status_code == 404:
+        return False, "not running on the worker (already finished, or unknown to it)"
+    if resp.status_code == 401:
+        return False, "Unauthorized: Fleet API key rejected by worker."
+    return False, f"HTTP {resp.status_code}: {resp.text}"
+
+
 def read_worker_result(worker: WorkerNode, run_id: str) -> tuple[str, Optional[dict], str]:
     """Poll hivemind-worker status endpoint for run_id. Return (status, payload_dict, log_tail)."""
     try:

@@ -233,6 +233,8 @@ Verify real-time HTTP reachability, Git readiness, and AI agent status across al
 hive check
 ```
 
+The table includes each worker's `hivemind-worker` version, with a warning when workers run different versions. `hive check` exits `1` if any worker is offline.
+
 ### Step 5: Dispatch a Parallel Swarm Job (`hive dispatch`)
 
 Dispatch a task to one or more worker machines:
@@ -264,6 +266,7 @@ hive dispatch "Optimize sorting algorithm" \
 | `--test <cmd>` | Test command executed after agent completes |
 | `--bench <cmd>` | Benchmark command producing JSON output |
 | `--model <id>` | Model override for the worker engine |
+| `--engine <name>` | Engine for every strategy (`claude-code`, `claude`, `agy`, `aider`), overriding `agent_engine` from `cluster.json` for this run only |
 
 **How strategies map to workers.** Each strategy is one slot. Strategy *n* goes to worker *n*, wrapping round when there are more strategies than workers. Slots without a name get `strategy-<n>`. A worker that gets several slots queues those beyond its `max_concurrent_runs` (default 2). Examples:
 
@@ -282,6 +285,8 @@ Poll the status of active and recent swarm runs:
 ```bash
 hive status                                   # Check latest run
 hive status --run 20261006-174456-add56543    # Check specific run
+hive status --watch                           # Re-poll every 10s until every strategy finishes
+hive status --watch --interval 30             # ...every 30s
 ```
 
 Polls every worker in parallel and displays a table with strategy names, branch names, execution status, test results, and output snippets. A `Benchmark` column appears when the run used `--bench` or any worker reported benchmark data.
@@ -296,7 +301,22 @@ Polls every worker in parallel and displays a table with strategy names, branch 
 | `cancelled` | Run was cancelled on the worker |
 | `unknown` | Worker could not be reached or rejected the fleet key |
 
-Run state is saved in `~/.hivemind/runs/<run_id>.json`. `hive status` and `hive merge` use the latest run unless you pass `--run`.
+Run state is saved in `~/.hivemind/runs/<run_id>.json`. `hive status`, `merge`, `cancel` and `logs` use the latest run unless you pass `--run`.
+
+Related commands:
+
+```bash
+hive runs                 # Saved runs, newest first (no worker is contacted; statuses are as of the last poll)
+hive runs -n 5            # Only the 5 newest
+
+hive logs                 # Latest log lines every strategy reports, plus its error
+hive logs ari             # One worker (use ari:simd if ari ran several strategies)
+
+hive cancel               # Cancel every strategy of the latest run that is still queued or running
+hive cancel --worker ari:simd
+```
+
+`hive logs` shows what the worker reports: the last 30 lines of the agent log while it runs, or of the test log when tests failed. The full logs stay on the worker in `<workspace_root>/<run_id>-<n>/.hive/`. `hive cancel` exits `1` if any worker could not cancel.
 
 ### Step 7: Inspect & Merge Winner (`hive merge`)
 
@@ -305,6 +325,7 @@ Run from your local development repository clone:
 ```bash
 cd ~/workspace/my-project
 hive merge
+hive merge --worker ari:simd --yes   # Non-interactive: pick the winner and skip the confirmation
 ```
 
 1. Refreshes the run and displays the worker results with test outcomes.

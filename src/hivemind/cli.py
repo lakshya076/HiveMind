@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import secrets
 import sys
+import time
 import click
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NoReturn, Optional
@@ -16,7 +17,14 @@ from rich.prompt import Prompt, Confirm, IntPrompt
 from hivemind.discovery.scanner import NetworkScanner, DiscoveredDevice
 from hivemind.discovery.prober import SystemProber
 from hivemind.discovery.tailscale import TailscaleScanner
-from hivemind.config.cluster import ClusterConfig, WorkerNode, get_default_cluster_path, get_hivemind_home, get_fleet_key
+from hivemind.config.cluster import (
+    SUPPORTED_ENGINES,
+    ClusterConfig,
+    WorkerNode,
+    get_default_cluster_path,
+    get_fleet_key,
+    get_hivemind_home,
+)
 from hivemind.runner.dispatch import (
     DispatchError,
     assign_strategies,
@@ -25,7 +33,8 @@ from hivemind.runner.dispatch import (
     select_workers,
     validate_branch_ref,
 )
-from hivemind.runner.state import RunState, WorkerRunState
+from hivemind.runner.remote import cancel_worker_job
+from hivemind.runner.state import RunState, WorkerRunState, get_runs_dir
 from hivemind.runner.status import (
     TERMINAL_STATUSES,
     local_base_branch,
@@ -34,6 +43,7 @@ from hivemind.runner.status import (
     local_working_tree_dirty,
     normalize_git_url,
     refresh_run,
+    worker_node_for,
 )
 
 console = Console()
@@ -131,6 +141,15 @@ def _worker_label(run: RunState, worker: WorkerRunState) -> str:
         return f"{worker.worker_id}:{worker.strategy}"
     return worker.worker_id
 
+
+def _pick_worker(run: RunState, choice: str, candidates: list[WorkerRunState]) -> WorkerRunState:
+    """Resolve a user's 'id' or 'id:strategy' to exactly one of ``candidates``, else exit 1."""
+    matches = [w for w in candidates if choice in (_worker_label(run, w), f"{w.worker_id}:{w.strategy}")]
+    if len(matches) == 1:
+        return matches[0]
+    if sum(w.worker_id == choice for w in run.workers) > 1:
+        _fail(f"Worker '{escape(choice)}' ran several strategies in this run; use '{escape(choice)}:<strategy>'.")
+    _fail(f"Unknown worker '{escape(choice)}'.")
 
 def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     show_bench = bool(run.bench_command) or any(
@@ -546,6 +565,7 @@ def check_cmd(cluster: Optional[str]):
     table.add_column("Daemon Reachable", justify="center")
     table.add_column("Git Ready", justify="center")
     table.add_column("Agent Engine", justify="center")
+    table.add_column("Version", justify="center")
     table.add_column("Live Hardware / Tools", style="cyan")
 
     probe_results: list[Optional[tuple]] = [None] * len(config.workers)
@@ -570,10 +590,14 @@ def check_cmd(cluster: Optional[str]):
                     progress.advance(task)
 
     not_ready = 0
+    versions: dict[str, list[str]] = {}
     for idx, worker in enumerate(config.workers):
         h_data, tags, err = probe_results[idx] or (None, [], "refused")
         if not h_data:
             not_ready += 1
+        version = str(h_data.get("version") or "?") if h_data else "-"
+        if h_data:
+            versions.setdefault(version, []).append(worker.id)
 
         if h_data:
             daemon_status = "[bold green]ONLINE (Ready)[/bold green]" if h_data.get("status") == "ready" else "[bold yellow]BUSY[/bold yellow]"
@@ -599,10 +623,17 @@ def check_cmd(cluster: Optional[str]):
             daemon_status,
             git_status,
             engine_status,
+            escape(version),
             live_caps_str
         )
 
     console.print("\n", table, "\n")
+    if len(versions) > 1:
+        detail = "; ".join(f"{escape(v)}: {escape(', '.join(ids))}" for v, ids in sorted(versions.items()))
+        console.print(
+            f"[bold yellow]Warning:[/bold yellow] workers run different hivemind-worker versions ({detail}). "
+            "Update them to the same version before dispatching.\n"
+        )
     if not_ready:
         sys.exit(1)
 
@@ -615,6 +646,12 @@ def check_cmd(cluster: Optional[str]):
 @click.option("--test", "test_command", default=None, help="Command to run after agent finishes (e.g. 'pytest -q').")
 @click.option("--bench", "bench_command", default=None, help="Benchmark command producing a JSON output.")
 @click.option("--model", default=None, help="Model override for the worker engine.")
+@click.option(
+    "--engine",
+    type=click.Choice(SUPPORTED_ENGINES),
+    default=None,
+    help="Engine for every strategy, overriding agent_engine from cluster.json.",
+)
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def dispatch_cmd(
     prompt: str,
@@ -624,6 +661,7 @@ def dispatch_cmd(
     test_command: Optional[str],
     bench_command: Optional[str],
     model: Optional[str],
+    engine: Optional[str],
     cluster: Optional[str],
 ):
     """Start a parallel coding job on worker machines."""
@@ -638,6 +676,8 @@ def dispatch_cmd(
         resolved_repo = resolve_repo_url(config, repo_url)
     except DispatchError as exc:
         _fail(escape(str(exc)))
+    if engine:
+        slot_workers = [w.model_copy(update={"agent_engine": engine}) for w in slot_workers]
 
     console.print(Panel.fit(
         f"[bold cyan]Dispatching Swarm Job[/bold cyan]\n"
@@ -683,42 +723,54 @@ def dispatch_cmd(
 
 @cli.command(name="status")
 @click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--watch", "-w", is_flag=True, default=False, help="Keep polling until every strategy has finished.")
+@click.option("--interval", default=10.0, show_default=True, type=click.FloatRange(min=1.0), help="Seconds between polls with --watch.")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
-def status_cmd(run_id: Optional[str], cluster: Optional[str]):
+def status_cmd(run_id: Optional[str], watch: bool, interval: float, cluster: Optional[str]):
     """Show live status of a dispatched run by reading result.json from workers."""
-    if not _require_fleet_key():
-        sys.exit(1)
-    run = _load_run(run_id)
-    config = _load_config(cluster, required=False)
-    workers_by_id = {w.id: w for w in config.workers} if config else {}
+    run, workers_by_id = _run_context(run_id, cluster)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task(f"Polling workers for run {run.run_id}...", total=len(run.workers))
-        run = refresh_run(run, workers_by_id)
-        progress.advance(task, advance=len(run.workers))
+    while True:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task(f"Polling workers for run {run.run_id}...", total=len(run.workers))
+            run = refresh_run(run, workers_by_id)
+            progress.advance(task, advance=len(run.workers))
 
-    console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {escape(run.repo_url)}[/dim]")
-    _print_run_table(run)
+        console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {escape(run.repo_url)}[/dim]")
+        _print_run_table(run)
 
-    all_done = all(w.status in TERMINAL_STATUSES for w in run.workers)
+        all_done = all(w.status in TERMINAL_STATUSES for w in run.workers)
+        if all_done or not watch:
+            break
+        console.print(f"[dim]Polling again in {interval:g}s (Ctrl+C to stop)...[/dim]")
+        time.sleep(interval)
+
     if all_done and run.workers:
         console.print("[dim]All workers finished. Review branches, then[/dim] [bold white]hive merge[/bold white].\n")
 
 
-@cli.command(name="merge")
-@click.option("--run", "run_id", default=None, help="Run id (default: latest).")
-@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
-def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
-    """Fetch a winning exp/* branch from origin and merge it into local main."""
+def _run_context(run_id: Optional[str], cluster: Optional[str]) -> tuple[RunState, dict[str, WorkerNode]]:
+    """Fleet key check, the run, and the cluster's workers by id (empty if no cluster file)."""
     if not _require_fleet_key():
         sys.exit(1)
     run = _load_run(run_id)
     config = _load_config(cluster, required=False)
-    workers_by_id = {w.id: w for w in config.workers} if config else {}
+    return run, ({w.id: w for w in config.workers} if config else {})
+
+
+@cli.command(name="merge")
+@click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--worker", "worker_choice", default=None, help="Winner to merge (id, or id:strategy); skips the prompt.")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Merge without asking for confirmation.")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cluster: Optional[str]):
+    """Fetch a winning exp/* branch from origin and merge it into local main."""
+    run, workers_by_id = _run_context(run_id, cluster)
     run = refresh_run(run, workers_by_id)
     _print_run_table(run, title=f"Pick a winner for {run.run_id}")
 
@@ -732,15 +784,13 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
     if not finished:
         _fail("No worker branches are available to merge yet.")
 
-    default_w = next((w for w in finished if w.status == "succeeded"), finished[0])
-    choice = Prompt.ask(
-        "Worker to merge (id, or id:strategy when a worker ran several)",
-        default=_worker_label(run, default_w),
-    )
-    matches = [w for w in finished if choice in (_worker_label(run, w), f"{w.worker_id}:{w.strategy}")]
-    if len(matches) != 1:
-        _fail(f"Unknown worker '{escape(choice)}'.")
-    winner = matches[0]
+    if worker_choice is None:
+        default_w = next((w for w in finished if w.status == "succeeded"), finished[0])
+        worker_choice = Prompt.ask(
+            "Worker to merge (id, or id:strategy when a worker ran several)",
+            default=_worker_label(run, default_w),
+        )
+    winner = _pick_worker(run, worker_choice, finished)
 
     try:
         validate_branch_ref(winner.branch)
@@ -789,7 +839,7 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
         border_style="blue",
     ))
 
-    if not Confirm.ask(f"Merge [bold]{winner.branch}[/bold] into local [bold]{base}[/bold]?", default=True):
+    if not yes and not Confirm.ask(f"Merge [bold]{winner.branch}[/bold] into local [bold]{base}[/bold]?", default=True):
         console.print("[dim]Merge cancelled.[/dim]")
         return
 
@@ -810,6 +860,94 @@ def merge_cmd(run_id: Optional[str], cluster: Optional[str]):
         "[dim]Push to origin when you are ready.[/dim]",
         border_style="green",
     ))
+
+
+@cli.command(name="cancel")
+@click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--worker", "worker_choice", default=None, help="Cancel only this one (id, or id:strategy).")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def cancel_cmd(run_id: Optional[str], worker_choice: Optional[str], cluster: Optional[str]):
+    """Cancel the strategies of a run that are still queued or running."""
+    run, workers_by_id = _run_context(run_id, cluster)
+    run = refresh_run(run, workers_by_id)
+
+    targets = [_pick_worker(run, worker_choice, run.workers)] if worker_choice else run.workers
+    targets = [w for w in targets if w.status not in TERMINAL_STATUSES]
+    if not targets:
+        console.print(f"[dim]Nothing to cancel: the selected strategies of run {run.run_id} have already finished.[/dim]")
+        return
+
+    failures = 0
+    for w in targets:
+        ok, message = cancel_worker_job(worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id)
+        label = escape(f"{w.worker_id}:{w.strategy}")
+        if ok:
+            console.print(f"[green]Cancelled[/green] {label}")
+        else:
+            failures += 1
+            console.print(f"[bold red]Could not cancel[/bold red] {label}: {escape(message)}")
+
+    _print_run_table(refresh_run(run, workers_by_id))
+    if failures:
+        sys.exit(1)
+
+
+@cli.command(name="runs")
+@click.option("--limit", "-n", default=20, show_default=True, type=click.IntRange(min=1), help="How many runs to show.")
+def runs_cmd(limit: int):
+    """List saved runs, newest first. Statuses are as of the last status/merge; workers are not contacted."""
+    runs: list[RunState] = []
+    for path in get_runs_dir().glob("*.json"):
+        try:
+            runs.append(RunState.model_validate_json(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue  # skip unreadable or hand-edited files instead of failing the listing
+    if not runs:
+        console.print("[dim]No runs yet. Start one with[/dim] [bold white]hive dispatch[/bold white].")
+        return
+    runs.sort(key=lambda r: (r.created_at, r.run_id), reverse=True)
+
+    table = Table(title=f"HiveMind Runs ({min(limit, len(runs))} of {len(runs)})", border_style="cyan")
+    table.add_column("Run ID", style="bold white", no_wrap=True)
+    table.add_column("Created (UTC)", style="dim", no_wrap=True)
+    table.add_column("Strategies", justify="center")
+    table.add_column("Status")
+    table.add_column("Prompt")
+    for run in runs[:limit]:
+        counts: dict[str, int] = {}
+        for w in run.workers:
+            counts[w.status] = counts.get(w.status, 0) + 1
+        summary = ", ".join(f"{n} {_status_style(s)}" for s, n in sorted(counts.items()))
+        prompt = run.prompt.replace("\n", " ")
+        table.add_row(
+            run.run_id,
+            run.created_at.replace("T", " ")[:16],
+            str(len(run.workers)),
+            summary or "[dim]-[/dim]",
+            escape(prompt if len(prompt) <= 60 else prompt[:57] + "..."),
+        )
+    console.print()
+    console.print(table)
+    console.print()
+
+
+@cli.command(name="logs")
+@click.argument("worker_choice", required=False)
+@click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def logs_cmd(worker_choice: Optional[str], run_id: Optional[str], cluster: Optional[str]):
+    """Show the latest log lines each worker reports for a run (all strategies, or WORKER / WORKER:STRATEGY)."""
+    run, workers_by_id = _run_context(run_id, cluster)
+    run = refresh_run(run, workers_by_id)
+    targets = [_pick_worker(run, worker_choice, run.workers)] if worker_choice else run.workers
+
+    for w in targets:
+        console.rule(f"{escape(w.worker_id)} · {escape(w.strategy)} · {_status_style(w.status)}")
+        if w.error:
+            console.print(f"[bold red]Error:[/bold red] {escape(w.error)}")
+        # Log text comes from the agent and tests: print it literally, never as markup.
+        console.print(w.log_tail or "(no log output reported yet)", markup=False, highlight=False)
+    console.print()
 
 
 if __name__ == "__main__":

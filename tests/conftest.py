@@ -23,6 +23,14 @@ def home(tmp_path, monkeypatch):
     return home_dir
 
 
+@pytest.fixture(autouse=True)
+def wide_console(monkeypatch):
+    """Render CLI output wide so assertions don't depend on where rich wraps lines."""
+    from hivemind.cli import console
+
+    monkeypatch.setattr(console, "width", 250)
+
+
 @pytest.fixture
 def fleet_key(home):
     key_dir = home / ".hivemind"
