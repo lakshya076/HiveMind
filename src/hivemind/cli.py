@@ -1005,10 +1005,12 @@ def logs_cmd(worker_choice: Optional[str], run_id: Optional[str], full: bool, lo
                 console.print(f"[yellow]Full {escape(log_file)} log unavailable: {escape(err or 'unknown error')}. "
                               "Showing the last lines instead.[/yellow]")
             else:
+                content_str = str(payload.get("content") or "")
+                size_val = payload.get("size", len(content_str.encode("utf-8")))
                 if payload.get("truncated"):
                     console.print(f"[dim]Showing the end of the {escape(log_file)} log: "
-                                  f"last {len(payload['content'].encode('utf-8'))} of {payload['size']} bytes.[/dim]")
-                text = payload.get("content") or f"(the {log_file} log is empty)"
+                                  f"last {len(content_str.encode('utf-8'))} of {size_val} bytes.[/dim]")
+                text = content_str or f"(the {log_file} log is empty)"
         # Log text comes from the agent and tests: print it literally, never as markup.
         console.print(text, markup=False, highlight=False)
     console.print()

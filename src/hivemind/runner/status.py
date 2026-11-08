@@ -2,12 +2,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 from typing import Optional
 
-from hivemind.config.cluster import WorkerNode
-from hivemind.runner.dispatch import DispatchError, validate_branch_ref
+from hivemind.config.cluster import SUPPORTED_ENGINES, WorkerNode
+from hivemind.runner.dispatch import DispatchError, validate_base_branch, validate_branch_ref
 from hivemind.runner.remote import read_worker_result
 from hivemind.runner.state import RunState, WorkerRunState
 
 TERMINAL_STATUSES = {"succeeded", "failed", "no_changes", "cancelled"}
+MAX_LOG_TAIL_CHARS = 65536
+MAX_ERROR_CHARS = 8192
 
 
 def worker_node_for(worker_state: WorkerRunState, workers_by_id: dict[str, WorkerNode]) -> WorkerNode:
@@ -15,11 +17,14 @@ def worker_node_for(worker_state: WorkerRunState, workers_by_id: dict[str, Worke
     worker = workers_by_id.get(worker_state.worker_id)
     if worker is not None:
         return worker
+    engine = worker_state.agent_engine.strip().lower() if worker_state.agent_engine else "claude-code"
+    if engine not in SUPPORTED_ENGINES:
+        engine = "claude-code"
     return WorkerNode(
         id=worker_state.worker_id,
         host=worker_state.host,
         port=worker_state.port or 7422,
-        agent_engine=worker_state.agent_engine,
+        agent_engine=engine,
     )
 
 
@@ -57,11 +62,14 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
         if res is None:
             continue
         status, payload, log_tail = res
+        if log_tail and len(log_tail) > MAX_LOG_TAIL_CHARS:
+            log_tail = log_tail[-MAX_LOG_TAIL_CHARS:]
 
-        worker_state.log_tail = log_tail or worker_state.log_tail
         if payload:
+            worker_state.log_tail = log_tail or worker_state.log_tail
             worker_state.status = str(payload.get("status") or status)
-            worker_state.error = payload.get("error") or None
+            raw_error = payload.get("error")
+            worker_state.error = str(raw_error)[:MAX_ERROR_CHARS] if raw_error else None
             reported_branch = payload.get("branch")
             if isinstance(reported_branch, str) and reported_branch.strip():
                 try:
@@ -73,16 +81,21 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
             worker_state.test_exit_code = payload.get("test_exit_code")
             worker_state.agent_exit_code = payload.get("agent_exit_code")
             worker_state.bench_exit_code = payload.get("bench_exit_code")
-            if isinstance(payload.get("base_branch"), str):
-                worker_state.base_branch = payload["base_branch"]
+            reported_base = payload.get("base_branch")
+            if isinstance(reported_base, str) and reported_base.strip():
+                try:
+                    worker_state.base_branch = validate_base_branch(reported_base)
+                except DispatchError:
+                    pass
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
         elif worker_state.status not in TERMINAL_STATUSES:
             # Only unfinished runs change: a finished result is never overwritten by a
             # worker that is offline or has since lost the run.
+            worker_state.log_tail = log_tail or worker_state.log_tail
             worker_state.status = status
             if status in ("unknown", "failed") and log_tail:
-                worker_state.error = log_tail
+                worker_state.error = log_tail[:MAX_ERROR_CHARS]
 
     run.save()
     return run
