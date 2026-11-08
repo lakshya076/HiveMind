@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 import subprocess
 from typing import Optional
 
@@ -37,7 +38,12 @@ def _poll_one_worker(
     return read_worker_result(worker_node_for(worker_state, workers_by_id), run_identifier)
 
 
-def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState:
+def refresh_run(
+    run: RunState,
+    workers_by_id: dict[str, WorkerNode],
+    *,
+    skip_terminal: bool = False,
+) -> RunState:
     """Poll each worker in parallel for live task status and update local run state."""
     if not run.workers:
         run.save()
@@ -45,17 +51,22 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
 
     count = len(run.workers)
     polled: list[Optional[tuple[str, Optional[dict], str]]] = [None] * count
-    with ThreadPoolExecutor(max_workers=min(32, max(1, count))) as pool:
-        futures = {
-            pool.submit(_poll_one_worker, ws, run.run_id, workers_by_id): idx
-            for idx, ws in enumerate(run.workers)
-        }
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                polled[idx] = future.result()
-            except Exception as exc:  # noqa: BLE001
-                polled[idx] = ("unknown", None, f"Status poll error: {exc}")
+    indices_to_poll = [
+        idx for idx, ws in enumerate(run.workers)
+        if not (skip_terminal and ws.status in TERMINAL_STATUSES)
+    ]
+    if indices_to_poll:
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(indices_to_poll)))) as pool:
+            futures = {
+                pool.submit(_poll_one_worker, run.workers[idx], run.run_id, workers_by_id): idx
+                for idx in indices_to_poll
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    polled[idx] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    polled[idx] = ("unknown", None, f"Status poll error: {exc}")
 
     for idx, worker_state in enumerate(run.workers):
         res = polled[idx]
@@ -67,7 +78,9 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
 
         if payload:
             worker_state.log_tail = log_tail or worker_state.log_tail
-            worker_state.status = str(payload.get("status") or status)
+            new_status = str(payload.get("status") or status)
+            if worker_state.status not in TERMINAL_STATUSES or new_status in TERMINAL_STATUSES:
+                worker_state.status = new_status
             raw_error = payload.get("error")
             worker_state.error = str(raw_error)[:MAX_ERROR_CHARS] if raw_error else None
             reported_branch = payload.get("branch")
@@ -101,14 +114,21 @@ def refresh_run(run: RunState, workers_by_id: dict[str, WorkerNode]) -> RunState
     return run
 
 
-def local_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(
-        ["git", *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+def local_git(*args: str, check: bool = True, timeout: float = 120.0) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        result = subprocess.run(
+            ["git", "-c", "protocol.ext.allow=never", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git {' '.join(args)} timed out after {int(timeout)}s") from exc
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
         raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
