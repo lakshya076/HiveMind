@@ -42,3 +42,20 @@ def test_load_latest_without_runs_raises():
 def test_load_unknown_run_raises():
     with pytest.raises(FileNotFoundError):
         RunState.load("20990101-000000-deadbeef")
+
+
+def test_save_and_load_refuse_symlinks(home, tmp_path):
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    runs_dir = get_runs_dir()
+    link = runs_dir / "20261107-120000-symlink1.json"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks require extra privileges on this machine")
+
+    with pytest.raises(ValueError, match="symlink"):
+        RunState.load("20261107-120000-symlink1")
+    with pytest.raises(ValueError, match="symlink"):
+        RunState(run_id="20261107-120000-symlink1", prompt="p", repo_url="r").save()
+

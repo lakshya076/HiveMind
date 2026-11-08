@@ -102,7 +102,14 @@ class ClusterConfig(BaseModel):
     def save(self, path: Optional[str | Path] = None) -> Path:
         file_path = Path(path) if path is not None else get_default_cluster_path()
         file_path.parent.mkdir(parents=True, exist_ok=True)
+        if file_path.is_symlink():
+            raise ValueError(f"Refusing to write cluster configuration through symlink: {file_path}")
 
-        with open(file_path, "w", encoding="utf-8") as f:
+        fd = os.open(file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(self.model_dump_json(indent=2))
+        try:
+            os.chmod(file_path, 0o600)
+        except OSError:
+            pass
         return file_path
