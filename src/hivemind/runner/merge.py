@@ -84,14 +84,14 @@ def prepare_merge(run: RunState, winner: WorkerRunState, cwd: Optional[str] = No
         if run_base:
             # A run started from --base merges back into that branch, not the default one.
             local_git("fetch", "origin", f"+refs/heads/{run_base}:refs/remotes/origin/{run_base}", cwd=cwd)
-        base = run_base or local_base_branch(cwd)
+        base = validate_base_branch(run_base or local_base_branch(cwd)) or "main"
         has_local_base = (
             local_git("show-ref", "--verify", "--quiet", f"refs/heads/{base}", check=False, cwd=cwd).returncode == 0
         )
         compare_base = base if has_local_base else f"origin/{base}"
         log = local_git("log", "--oneline", f"{compare_base}..origin/{winner.branch}", check=False, cwd=cwd)
         diff = local_git("diff", "--stat", f"{compare_base}...origin/{winner.branch}", check=False, cwd=cwd)
-    except RuntimeError as exc:
+    except (RuntimeError, DispatchError) as exc:
         raise MergeError(str(exc)) from exc
     return MergePlan(winner, base, compare_base, has_local_base, log.stdout, diff.stdout)
 
