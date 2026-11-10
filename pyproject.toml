@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hivemind"
-version = "0.1.0"
+version = "1.1.0"
 description = "Distributed AI Coding Agent Fleet Orchestrator"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -212,3 +212,13 @@ def test_merge_offers_nothing_for_unpushed_branches(runner, fleet_key, fake_http
     )
     result = runner.invoke(cli, ["merge"])
     assert "No worker branches are available" in result.output
+
+
+def test_version_matches_the_package():
+    # __init__.py and pyproject.toml must be bumped together.
+    from importlib.metadata import version
+
+    from hivemind import __version__
+
+    assert version("hivemind") == __version__
+    assert __version__ in CliRunner().invoke(cli, ["--version"]).output
