@@ -2,8 +2,8 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from hivemind.cli import _merge_workers, cli
-from hivemind.config.cluster import ClusterConfig, WorkerNode
+from hivemind.cli import cli
+from hivemind.config.cluster import ClusterConfig, WorkerNode, merge_workers
 from hivemind.runner.state import RunState, WorkerRunState
 
 RUN_ID = "20261107-120000-abcd1234"
@@ -36,7 +36,7 @@ def test_merge_workers_keeps_unselected_and_replaces_matches():
     old_b = WorkerNode(id="b", host="10.0.0.2")
     new_b = WorkerNode(id="b-renamed", host="10.0.0.2", agent_engine="aider")
     new_c = WorkerNode(id="c", host="10.0.0.3")
-    assert _merge_workers([old_a, old_b], [new_b, new_c]) == [old_a, new_b, new_c]
+    assert merge_workers([old_a, old_b], [new_b, new_c]) == [old_a, new_b, new_c]
 
 
 def test_dispatch_command_saves_run(runner, fleet_key, fake_http):

@@ -24,6 +24,7 @@ from hivemind.config.cluster import (
     get_default_cluster_path,
     get_fleet_key,
     get_hivemind_home,
+    merge_workers,
 )
 from hivemind.runner.dispatch import (
     DispatchError,
@@ -31,21 +32,19 @@ from hivemind.runner.dispatch import (
     dispatch_run,
     resolve_repo_url,
     select_workers,
-    validate_base_branch,
-    validate_branch_ref,
+)
+from hivemind.runner.merge import (
+    MergeError,
+    default_winner,
+    mergeable_workers,
+    pick_worker,
+    prepare_merge,
+    run_merge,
+    worker_label,
 )
 from hivemind.runner.remote import LOG_FILES, cancel_worker_job, fetch_worker_log
-from hivemind.runner.state import RunState, WorkerRunState, get_runs_dir
-from hivemind.runner.status import (
-    TERMINAL_STATUSES,
-    local_base_branch,
-    local_git,
-    local_repo_origin,
-    local_working_tree_dirty,
-    normalize_git_url,
-    refresh_run,
-    worker_node_for,
-)
+from hivemind.runner.state import RunState, WorkerRunState
+from hivemind.runner.status import TERMINAL_STATUSES, refresh_run, worker_node_for
 
 console = Console()
 
@@ -121,36 +120,12 @@ def _format_benchmark(worker: WorkerRunState) -> str:
     return "[dim]-[/dim]"
 
 
-def _merge_workers(existing: list[WorkerNode], updated: list[WorkerNode]) -> list[WorkerNode]:
-    """Merge newly configured workers into an existing worker list without losing unselected ones."""
-    merged = list(existing)
-    for new_w in updated:
-        replaced = False
-        for idx, old_w in enumerate(merged):
-            if old_w.id == new_w.id or (old_w.host == new_w.host and old_w.port == new_w.port):
-                merged[idx] = new_w
-                replaced = True
-                break
-        if not replaced:
-            merged.append(new_w)
-    return merged
-
-
-def _worker_label(run: RunState, worker: WorkerRunState) -> str:
-    """Worker id, or id:strategy when that worker ran several strategies in this run."""
-    if sum(w.worker_id == worker.worker_id for w in run.workers) > 1:
-        return f"{worker.worker_id}:{worker.strategy}"
-    return worker.worker_id
-
-
 def _pick_worker(run: RunState, choice: str, candidates: list[WorkerRunState]) -> WorkerRunState:
     """Resolve a user's 'id' or 'id:strategy' to exactly one of ``candidates``, else exit 1."""
-    matches = [w for w in candidates if choice in (_worker_label(run, w), f"{w.worker_id}:{w.strategy}")]
-    if len(matches) == 1:
-        return matches[0]
-    if sum(w.worker_id == choice for w in run.workers) > 1:
-        _fail(f"Worker '{escape(choice)}' ran several strategies in this run; use '{escape(choice)}:<strategy>'.")
-    _fail(f"Unknown worker '{escape(choice)}'.")
+    try:
+        return pick_worker(run, choice, candidates)
+    except MergeError as exc:
+        _fail(escape(str(exc)))
 
 def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     show_bench = bool(run.bench_command) or any(
@@ -529,7 +504,7 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
     cluster_config = ClusterConfig(
         cluster_name=existing_config.cluster_name if existing_config else "hive-fleet",
         repo_url=existing_config.repo_url if existing_config else None,
-        workers=_merge_workers(existing_config.workers, workers) if existing_config else workers,
+        workers=merge_workers(existing_config.workers, workers) if existing_config else workers,
     )
 
     saved_path = cluster_config.save(output)
@@ -813,101 +788,46 @@ def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cl
     run = refresh_run(run, workers_by_id)
     _print_run_table(run, title=f"Pick a winner for {run.run_id}")
 
-    finished = [
-        w for w in run.workers
-        if w.branch
-        and w.pushed is not False
-        and w.status not in ("no_changes", "cancelled", "starting", "running")
-        and not (w.status == "failed" and w.pushed is not True and w.agent_exit_code is None)
-    ]
+    finished = mergeable_workers(run)
     if not finished:
         _fail("No worker branches are available to merge yet.")
 
     if worker_choice is None:
-        default_w = next((w for w in finished if w.status == "succeeded"), finished[0])
+        default_w = default_winner(finished)
         if yes:
             # Never merge a failed strategy unattended.
             if default_w.status != "succeeded":
                 _fail("No strategy succeeded. Pass --worker to merge one anyway.")
-            worker_choice = _worker_label(run, default_w)
+            worker_choice = worker_label(run, default_w)
             console.print(f"Merging [bold]{escape(worker_choice)}[/bold] (first succeeded strategy).")
         else:
             worker_choice = Prompt.ask(
                 "Worker to merge (id, or id:strategy when a worker ran several)",
-                default=_worker_label(run, default_w),
+                default=worker_label(run, default_w),
             )
     winner = _pick_worker(run, worker_choice, finished)
 
     try:
-        validate_branch_ref(winner.branch)
-    except DispatchError as exc:
-        _fail(escape(str(exc)))
-
-    origin = local_repo_origin()
-    if origin is None:
-        _fail(
-            "Run hive merge from a clone of the shared origin.\n"
-            f"[dim]Expected repo:[/dim] {escape(run.repo_url)}"
-        )
-    if normalize_git_url(origin) != normalize_git_url(run.repo_url):
-        _fail(
-            "This directory's origin does not match the run.\n"
-            f"  local: {escape(origin)}\n"
-            f"  run:   {escape(run.repo_url)}"
-        )
-
-    if local_working_tree_dirty():
-        _fail(
-            "Local working tree has uncommitted changes. "
-            "Commit or stash them before running [bold white]hive merge[/bold white]."
-        )
-
-    try:
-        run_base = validate_base_branch(run.base_branch)
-    except DispatchError as exc:
-        _fail(escape(str(exc)))
-
-    try:
-        local_git(
-            "fetch",
-            "origin",
-            f"+refs/heads/{winner.branch}:refs/remotes/origin/{winner.branch}",
-        )
-        if run_base:
-            # A run started from --base merges back into that branch, not the default one.
-            local_git("fetch", "origin", f"+refs/heads/{run_base}:refs/remotes/origin/{run_base}")
-        base = run_base or local_base_branch()
-        has_local_base = (
-            local_git("show-ref", "--verify", "--quiet", f"refs/heads/{base}", check=False).returncode == 0
-        )
-        compare_base = base if has_local_base else f"origin/{base}"
-        log = local_git("log", "--oneline", f"{compare_base}..origin/{winner.branch}", check=False)
-        diff = local_git("diff", "--stat", f"{compare_base}...origin/{winner.branch}", check=False)
-    except RuntimeError as exc:
+        plan = prepare_merge(run, winner)
+    except MergeError as exc:
         _fail(escape(str(exc)))
 
     console.print(Panel(
         # Commit messages come from the worker's agent: never let them render as markup.
-        (escape(log.stdout) if log.stdout else "[dim]no commits on branch[/dim]") + "\n" + escape(diff.stdout or ""),
-        title=f"origin/{winner.branch} vs {compare_base}",
+        (escape(plan.commits) if plan.commits else "[dim]no commits on branch[/dim]") + "\n" + escape(plan.diff_stat or ""),
+        title=f"origin/{winner.branch} vs {plan.compare_base}",
         border_style="blue",
     ))
 
+    base = plan.base
     if not yes and not Confirm.ask(f"Merge [bold]{winner.branch}[/bold] into local [bold]{base}[/bold]?", default=True):
         console.print("[dim]Merge cancelled.[/dim]")
         return
 
     try:
-        if has_local_base:
-            local_git("checkout", base)
-        else:
-            local_git("checkout", "-B", base, f"origin/{base}")
-        local_git("merge", "--no-ff", f"origin/{winner.branch}", "-m", f"hive: merge {winner.branch} from {run.run_id}")
-    except RuntimeError as exc:
-        _fail(
-            f"{escape(str(exc))}\n"
-            "If the merge stopped on conflicts, resolve them and commit, or run [bold white]git merge --abort[/bold white]."
-        )
+        run_merge(run, plan)
+    except MergeError as exc:
+        _fail(escape(str(exc)))
 
     console.print(Panel.fit(
         f"[bold green]Merged[/bold green] [white]{winner.branch}[/white] into local [white]{base}[/white].\n"
@@ -963,16 +883,10 @@ def cancel_cmd(run_id: Optional[str], worker_choice: Optional[str], cluster: Opt
 @click.option("--limit", "-n", default=20, show_default=True, type=click.IntRange(min=1), help="How many runs to show.")
 def runs_cmd(limit: int):
     """List saved runs, newest first. Statuses are as of the last status/merge; workers are not contacted."""
-    runs: list[RunState] = []
-    for path in get_runs_dir().glob("*.json"):
-        try:
-            runs.append(RunState.model_validate_json(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            continue  # skip unreadable or hand-edited files instead of failing the listing
+    runs = RunState.load_all()
     if not runs:
         console.print("[dim]No runs yet. Start one with[/dim] [bold white]hive dispatch[/bold white].")
         return
-    runs.sort(key=lambda r: (r.created_at, r.run_id), reverse=True)
 
     table = Table(title=f"HiveMind Runs ({min(limit, len(runs))} of {len(runs)})", border_style="cyan")
     table.add_column("Run ID", style="bold white", no_wrap=True)

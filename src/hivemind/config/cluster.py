@@ -113,3 +113,18 @@ class ClusterConfig(BaseModel):
         except OSError:
             pass
         return file_path
+
+
+def merge_workers(existing: list[WorkerNode], updated: list[WorkerNode]) -> list[WorkerNode]:
+    """Merge newly configured workers into an existing worker list without losing unselected ones."""
+    merged = list(existing)
+    for new_w in updated:
+        replaced = False
+        for idx, old_w in enumerate(merged):
+            if old_w.id == new_w.id or (old_w.host == new_w.host and old_w.port == new_w.port):
+                merged[idx] = new_w
+                replaced = True
+                break
+        if not replaced:
+            merged.append(new_w)
+    return merged

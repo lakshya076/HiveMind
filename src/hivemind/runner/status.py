@@ -114,7 +114,9 @@ def refresh_run(
     return run
 
 
-def local_git(*args: str, check: bool = True, timeout: float = 120.0) -> subprocess.CompletedProcess:
+def local_git(
+    *args: str, check: bool = True, timeout: float = 120.0, cwd: Optional[str] = None
+) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
@@ -126,6 +128,7 @@ def local_git(*args: str, check: bool = True, timeout: float = 120.0) -> subproc
             errors="replace",
             env=env,
             timeout=timeout,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"git {' '.join(args)} timed out after {int(timeout)}s") from exc
@@ -135,20 +138,20 @@ def local_git(*args: str, check: bool = True, timeout: float = 120.0) -> subproc
     return result
 
 
-def local_repo_origin() -> Optional[str]:
-    result = local_git("remote", "get-url", "origin", check=False)
+def local_repo_origin(cwd: Optional[str] = None) -> Optional[str]:
+    result = local_git("remote", "get-url", "origin", check=False, cwd=cwd)
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
 
 
-def local_working_tree_dirty() -> bool:
-    result = local_git("status", "--porcelain", "--untracked-files=no", check=False)
+def local_working_tree_dirty(cwd: Optional[str] = None) -> bool:
+    result = local_git("status", "--porcelain", "--untracked-files=no", check=False, cwd=cwd)
     return bool(result.stdout.strip())
 
 
-def local_base_branch() -> str:
-    sym = local_git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", check=False)
+def local_base_branch(cwd: Optional[str] = None) -> str:
+    sym = local_git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", check=False, cwd=cwd)
     if sym.returncode == 0 and sym.stdout.strip():
         ref = sym.stdout.strip()
         prefix = "refs/remotes/origin/"
@@ -156,14 +159,14 @@ def local_base_branch() -> str:
             return ref[len(prefix):]
 
     for name in ("main", "master"):
-        exists = local_git("show-ref", "--verify", "--quiet", f"refs/heads/{name}", check=False)
+        exists = local_git("show-ref", "--verify", "--quiet", f"refs/heads/{name}", check=False, cwd=cwd)
         if exists.returncode == 0:
             return name
-        remote = local_git("show-ref", "--verify", "--quiet", f"refs/remotes/origin/{name}", check=False)
+        remote = local_git("show-ref", "--verify", "--quiet", f"refs/remotes/origin/{name}", check=False, cwd=cwd)
         if remote.returncode == 0:
             return name
 
-    head = local_git("symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    head = local_git("symbolic-ref", "--quiet", "--short", "HEAD", check=False, cwd=cwd)
     if head.returncode == 0 and head.stdout.strip():
         cur = head.stdout.strip()
         if not cur.startswith("exp/"):

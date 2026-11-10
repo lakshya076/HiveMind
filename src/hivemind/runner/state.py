@@ -137,3 +137,15 @@ class RunState(BaseModel):
         if not run_id:
             raise FileNotFoundError("Latest-run pointer is empty. Dispatch a job first.")
         return cls.load(run_id)
+
+    @classmethod
+    def load_all(cls) -> List["RunState"]:
+        """Every saved run, newest first. Unreadable or hand-edited files are skipped."""
+        runs: List[RunState] = []
+        for path in get_runs_dir().glob("*.json"):
+            try:
+                runs.append(cls.model_validate_json(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+        runs.sort(key=lambda r: (r.created_at, r.run_id), reverse=True)
+        return runs
