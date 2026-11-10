@@ -294,11 +294,18 @@ def _scan(mode: str, port: int) -> list[DiscoveredDevice]:
     return [d for d in found if not d.is_local_host]
 
 
+def _valid_port(port: int) -> int:
+    if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+        raise ToolError(f"Invalid port {port!r}; must be 1..65535.")
+    return port
+
+
 @app.tool(annotations=READ_ONLY)
 def hive_discover(mode: Literal["auto", "tailscale", "local", "both"] = "auto", port: int = 7422) -> dict[str, Any]:
     """Find machines that could become workers, over Tailscale and/or the local subnet ("auto": Tailscale
     when connected, else local). Read-only: no fleet key is sent and nothing is saved. Add machines with
     hive_add_workers, which asks the human."""
+    _valid_port(port)
     if mode == "auto":
         mode = "tailscale" if TailscaleScanner.backend_state() == "Running" else "local"
     elif mode in ("tailscale", "both") and TailscaleScanner.backend_state() != "Running":
@@ -320,14 +327,15 @@ def _valid_hosts(ips: list[str]) -> list[str]:
     if not ips:
         raise ToolError("Pass at least one IP from hive_discover.")
     try:
-        return [validate_worker_host(ip) for ip in ips]
+        return list(dict.fromkeys(validate_worker_host(ip) for ip in ips))
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
 
-def _ask_human(ips: list[str], ctx: Context):
+def _ask_human(ips: list[str], port: int, ctx: Context):
     """Resolver for hive_add_workers: the human ticks machines in the client's own form."""
     hosts = _valid_hosts(ips)  # before asking: never show the human a host that would be rejected
+    _valid_port(port)
     caps = ctx.client_capabilities
     if not (caps and caps.elicitation):
         return None
@@ -357,13 +365,14 @@ def _worker_id(health: dict, ip: str, taken: set[str]) -> str:
 @app.tool()
 def hive_add_workers(
     ips: list[str],
+    approval: Annotated[Optional[BaseModel], Resolve(_ask_human)],
     port: int = 7422,
-    approval: Annotated[Optional[BaseModel], Resolve(_ask_human)] = None,
 ) -> dict[str, Any]:
     """Ask the human to add machines (IPs from hive_discover) as workers. The human ticks each one in a
     form shown by your MCP client; only ticked machines get the fleet key and are saved to cluster.json.
     If the client cannot show forms, nothing is added and the human must run `hive discover` instead."""
     hosts = _valid_hosts(ips)
+    _valid_port(port)
     if approval is None:
         return {"added": [], "needs_human": True,
                 "message": "This MCP client cannot ask the human directly. Ask them to run "
