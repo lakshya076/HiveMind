@@ -296,9 +296,10 @@ Expected JSON response:
   "ram_gb": 7.6,
   "engines": ["agy", "aider"],
   "git_ready": true,
-  "version": "0.1.0",
+  "version": "1.0.1",
   "status": "ready",
-  "active_runs": []
+  "active_runs": [],
+  "features": ["base_branch", "logs"]
 }
 ```
 

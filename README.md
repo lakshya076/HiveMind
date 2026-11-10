@@ -1,7 +1,10 @@
 # HiveMind: Distributed AI Coding Agent Fleet
 
+[![tests](https://github.com/lakshya076/HiveMind/actions/workflows/tests.yml/badge.svg)](https://github.com/lakshya076/HiveMind/actions/workflows/tests.yml)
+[![Version](https://img.shields.io/badge/Version-1.1.0-green.svg)](pyproject.toml)
 [![Status](https://img.shields.io/badge/Status-Active_Development-orange.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](license.txt)
+[![MCP](https://img.shields.io/badge/MCP-hive_mcp-black.svg)](#step-8-let-an-ai-agent-drive-the-fleet-hive-mcp)
 [![Target-Engines](https://img.shields.io/badge/Engines-Claude_Code_|_Antigravity_|_Aider-purple.svg)](#)
 
 > **Transform multiple machines into a coordinated, parallel AI software engineering team.**  
@@ -25,6 +28,7 @@
   * [Step 5: Dispatch a Parallel Swarm Job (`hive dispatch`)](#step-5-dispatch-a-parallel-swarm-job-hive-dispatch)
   * [Step 6: Track Live Execution (`hive status`)](#step-6-track-live-execution-hive-status)
   * [Step 7: Inspect & Merge Winner (`hive merge`)](#step-7-inspect--merge-winner-hive-merge)
+  * [Step 8: Let an AI Agent Drive the Fleet (`hive mcp`)](#step-8-let-an-ai-agent-drive-the-fleet-hive-mcp)
 * [6. Running `hivemind-worker` as a Persistent Service](#6-running-hivemind-worker-as-a-persistent-service)
   * [🐧 Linux (systemd Service)](#-linux-systemd-service)
   * [🪟 Windows (Background / Task Scheduler / NSSM)](#-windows-background--task-scheduler--nssm)
@@ -32,6 +36,7 @@
 * [8. Project Documentation](#8-project-documentation)
   * [Network & Machine Setup Guide](NETWORK_SETUP.md)
 * [9. Development & Tests](#9-development--tests)
+  * [Continuous integration](#continuous-integration)
 * [10. License](#10-license)
 
 ---
@@ -45,6 +50,7 @@ Instead of relying on a single AI agent working sequentially on one computer, Hi
 * **Master Node (Lead Architect):** Runs the `hive` CLI. Discovers fleet nodes over Tailscale or local subnets, decomposes coding goals into parallel implementation strategies, and dispatches them across workers.
 * **Worker Fleet (`hivemind-worker` Daemons):** Lightweight HTTP daemons running on port `7422` of each worker machine. Each daemon manages headless AI coding sessions (Claude Code, Antigravity CLI `agy`, Aider) in isolated Git branches, running builds, tests, and benchmark suites on local hardware.
 * **Git Origin Synchronization:** All code changes travel through isolated experimental branches (`exp/<run_id>/<worker>-<strategy>`, see [Branch naming](#branch-naming)) on your shared Git remote (GitHub, GitLab, or self-hosted). The master machine reviews and merges the winning solution into your main branch.
+* **AI Agent on the Master (optional):** `hive mcp` exposes the same commands as MCP tools, so Claude Code, agy, Cursor or Codex on the master can dispatch, follow and merge runs for you. You still review the merge and run `git push`.
 
 ---
 
@@ -56,6 +62,8 @@ Instead of relying on a single AI agent working sequentially on one computer, Hi
 * **Competitive Strategy Exploration**: Run $N$ parallel implementations of complex features (e.g., SIMD vs. Actor Queues vs. Memory-Mapped files) concurrently.
 * **Hardware-Aware Tool Detection**: Automatically detects installed AI engines (`claude-code`, `agy`, `aider`), CPU core count, available RAM, and Git readiness at probe time.
 * **Isolated Branch Workflows**: Autonomous agents only edit code in designated workspace branches. The worker daemon safely manages git branching, commit creation, and branch pushes.
+* **MCP Server for AI Agents (`hive mcp`)**: Ten tools over stdio (check, dispatch, status, logs, cancel, merge, discover and more). The agent can use the fleet but not change it: no key access, no push, and new workers need your approval in an MCP form.
+* **Scriptable CLI**: Every command exits `0` or `1`; `hive merge --yes` and `--worker` run without prompts.
 
 ---
 
@@ -71,6 +79,9 @@ Instead of relying on a single AI agent working sequentially on one computer, Hi
 │  4. hive dispatch ──► POST /dispatch with task prompt, repo URL, test cmd   │
 │  5. hive status   ──► GET /status/{run_id} polling, renders live table      │
 │  6. hive merge    ──► git fetch origin exp/* branch, diff preview, merge    │
+│                                                                             │
+│  Optional: AI agent (Claude Code / agy / Cursor) ──stdio──► hive mcp        │
+│            calls the same steps 3–6 as tools; you review and git push       │
 └──────────────────────────────────┬──────────────────────────────────────────┘
                                    │ HTTP REST (Port 7422 + Bearer Token)
                     ┌──────────────▼───────────────┐
@@ -115,17 +126,21 @@ Example: `hive dispatch "…" --workers Hermes --strategy "Quick Sort/SIMD"` pus
 
 ### Master Machine Setup (`hive`)
 
-The master machine runs the `hive` orchestration CLI.
+The master machine runs the `hive` orchestration CLI (and, optionally, `hive mcp` for an AI agent). It needs Python 3.10 or later and git.
 
-#### 1. Clone the repository:
+#### 1. Install with `uv` (Recommended) or `pip`:
+
+Without cloning, straight from GitHub:
 ```bash
-git clone https://github.com/your-username/HiveMind.git
-cd HiveMind
+uv tool install git+https://github.com/lakshya076/HiveMind
 ```
 
-#### 2. Install using `uv` (Recommended) or `pip`:
+Or from a clone, editable, if you want to change the code:
 ```bash
-# Option A: Fast Global Setup with uv
+git clone https://github.com/lakshya076/HiveMind.git
+cd HiveMind
+
+# Option A: Global setup with uv
 uv tool install -e .
 
 # Option B: Using standard pip in virtualenv
@@ -135,7 +150,9 @@ python -m venv .venv
 pip install -e .
 ```
 
-#### 3. Generate your Fleet API Key:
+Every option also installs the MCP SDK that `hive mcp` uses. Check with `hive --version` (`1.1.0`). After pulling new code, re-run the install (`uv tool install -e . --reinstall` or `pip install -e .`) so new dependencies are picked up.
+
+#### 2. Generate your Fleet API Key:
 ```bash
 hive keygen
 ```
@@ -299,7 +316,7 @@ Polls every worker in parallel and displays a table with strategy names, branch 
 | `starting` | Queued on the worker or preparing the workspace |
 | `running` | Agent, tests or benchmark in progress |
 | `succeeded` | Agent finished, tests passed (or none given), branch pushed |
-| `no_changes` | Agent finished without changing any file; nothing pushed |
+| `no_changes` | Agent finished without changing any file; nothing was pushed. hivemind-worker 1.0.1+ also skips tests and benchmark then, so an untouched broken repo shows `no_changes`, not a test failure |
 | `failed` | Agent error, test failure, timeout, or `git push` failure (see Details) |
 | `cancelled` | Run was cancelled on the worker |
 | `unknown` | Worker could not be reached or rejected the fleet key |
@@ -351,6 +368,95 @@ The base branch is the run's `--base` branch if it had one (fetched from origin 
 * the current directory's `origin` is not the run's repository (SSH and HTTPS forms of the same URL count as equal);
 * tracked files have uncommitted changes (untracked files are fine);
 * the branch is not a valid ref under `exp/`.
+
+### Step 8: Let an AI Agent Drive the Fleet (`hive mcp`)
+
+`hive mcp` serves the hive commands as [MCP](https://modelcontextprotocol.io) tools, so an agent such as Claude Code, agy, Cursor or Codex can split a task into strategies, dispatch it, follow it and merge the winner. Nothing is hosted: the agent starts `hive mcp` as a local process and talks to it over stdin/stdout. It uses the same `~/.hivemind` files and fleet key as the CLI, so do Steps 1–4 first.
+
+```
+your machine (master)
+┌──────────────────────────────────────────────┐
+│ Claude Code / agy / Cursor / Codex           │
+│   │ starts `hive mcp` as a child process     │
+│   │ JSON-RPC over stdin/stdout               │
+│   ▼                                          │
+│ hive mcp ── ~/.hivemind (cluster.json,       │
+│   │          fleet.key, runs/)               │
+└───┼──────────────────────────────────────────┘
+    │ HTTP :7422 + fleet key (same as the CLI)
+    ▼
+  workers
+```
+
+The server only runs while the agent's session does. It opens no port and is not reachable from the network. Worker machines never get these tools: their agents only edit their own `exp/*` branch.
+
+#### Register it
+
+Once per agent. For Claude Code:
+
+```bash
+claude mcp add --scope user hive -- hive mcp     # every project
+claude mcp add hive -- hive mcp                  # only the current project (local scope)
+claude mcp get hive                              # scope and connection status
+```
+
+Without installing `hive` first, the client can run it through `uvx`, which caches it after the first start:
+
+```bash
+claude mcp add --scope user hive -- uvx --from git+https://github.com/lakshya076/HiveMind hive mcp
+```
+
+To share it with everyone working in a repository, commit a `.mcp.json` at its root:
+
+```json
+{ "mcpServers": { "hive": { "command": "hive", "args": ["mcp"] } } }
+```
+
+Other clients take the same entry in their MCP config file (`.cursor/mcp.json`, agy's MCP settings, `~/.codex/config.toml`): command `hive`, arguments `["mcp"]`.
+
+#### Tools
+
+| Tool | What it does |
+|---|---|
+| `hive_list`, `hive_check`, `hive_runs` | The cluster file, live worker health, saved runs |
+| `hive_dispatch` | Start a run (prompt, strategies, workers, test, bench, model, engine, base); returns the run with its `run_id` |
+| `hive_status` | Poll the workers once; `finished` is true when every strategy has ended |
+| `hive_logs` | Last lines per strategy, or with `full` the end of the agent, test, bench or wrapper log |
+| `hive_cancel` | Cancel strategies that are still queued or running |
+| `hive_merge` | Preview the winner's commits and diff stat for the clone at `repo_path`; with `confirm=true`, merge it into the run's base branch. Without a named worker it takes the first succeeded strategy and never a failed one |
+| `hive_discover` | Find candidate machines over Tailscale or the local subnet. Read-only: no key is sent and nothing is saved |
+| `hive_add_workers` | Add machines from `hive_discover`, **only after you approve them** (see below) |
+
+#### How an agent runs a task
+
+Ask in plain words, for example *"Make fib() in tasks/perf/fib.py fast, use the fleet, try an iterative and a memoized version"*. The server's instructions tell the agent to follow this loop:
+
+1. `hive_check`: which workers are online and which engines they have.
+2. `hive_dispatch` with a prompt, one name per strategy, and a `test` command so success is measured (plus `bench` to compare speed).
+3. `hive_status` repeatedly until `finished` is true.
+4. `hive_logs` (with `full=true, file="test"`) for any strategy that failed.
+5. `hive_merge` with `repo_path` set to your clone: a preview of the winner's commits and diff stat.
+6. `hive_merge` again with `confirm=true` to merge into the run's base branch.
+
+Then you review the merge and run `git push`.
+
+#### What the agent cannot do
+
+* **Push.** Merges happen in your local clone only; you review and run `git push`.
+* **Create or see the fleet key.** `hive keygen` is not a tool.
+* **Add workers on its own.** `hive_add_workers` asks you through MCP elicitation: your MCP client shows a form with one checkbox per machine, all unticked, and your answer goes from the client to `hive mcp` without passing through the agent. Only the machines you tick receive the fleet key and are saved to `cluster.json`. If your client can't show such forms, nothing is added and the tool tells the agent to ask you to run `hive discover`.
+
+To add machines yourself instead, run `hive discover` in a terminal; `hive keygen` also stays in the terminal.
+
+#### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `/mcp` shows `Failed to reconnect to hive: CONNECTION_CLOSED` | `hive mcp` exited at once. Run `hive mcp` in a terminal: an error message says why (usually one of the next two rows); if it just waits for input, it works (Ctrl+C) and the client is starting a different `hive`. |
+| `No module named 'mcp'` | `hive` was installed before it depended on the MCP SDK. Reinstall: `uv tool install -e . --reinstall` or `pip install -e .`. |
+| `hive --version` shows an old version | More than one `hive` is on your `PATH` (e.g. a pip install and a uv tool). The client starts the first one: check with `which -a hive` (`where hive` on Windows) and reinstall or remove the stale one. |
+| The tools work in one folder only | It was registered with local scope. Re-add it with `--scope user`. |
+| Tools fail with `No fleet key` or `No cluster file` | Do Steps 1–2 on this machine first (`hive keygen`, `hive discover`). |
 
 ---
 
@@ -458,16 +564,18 @@ nssm start HiveMindWorker
 
 | Mechanism | Detail |
 |---|---|
-| **Restricted REST Endpoints** | Only typed endpoints are exposed (`/`, `/health`, `/dispatch`, `/status`, `/cancel`, `/runs`; see the [worker README](https://github.com/lakshya076/hivemind-worker#-api-endpoints)). No arbitrary shell execution endpoints. |
+| **Restricted REST Endpoints** | Only typed endpoints are exposed (`/`, `/health`, `/dispatch`, `/status`, `/cancel`, `/runs`, `/logs`; see the [worker README](https://github.com/lakshya076/hivemind-worker#-api-endpoints)). No arbitrary shell execution endpoints. |
 | **Fleet Key Bearer Token** | Every endpoint except the `/` identity check requires `Authorization: Bearer <FLEET_KEY>`. Unauthorized requests are rejected with HTTP 401. Workers refuse to run without a key, and `hive check`, `dispatch`, `status` and `merge` exit before any network request if no key is found in `~/.hivemind/fleet.key` or `HIVEMIND_FLEET_KEY`. |
 | **Key Only Sent to Chosen Workers** | `hive discover` finds workers without credentials and sends the key only to the devices you select. `hive` never loads `cluster.json` from the current directory. |
 | **Input Validation on Both Sides** | Repo URLs that could inject git options or reach UNC network shares, path-traversal run IDs, unsupported engines, model names that could be read as flags, and oversized prompts are rejected by `hive` before dispatch and again by the worker (HTTP 422). Branches must be under `exp/` on both sides: workers only ever force-push `exp/` branches, and `hive merge` only merges them. |
-| **Safe Merge** | `hive merge` only merges into a clean working tree of the matching repository, never pushes, and asks before merging. |
+| **Safe Merge** | `hive merge` only merges into a clean working tree of the matching repository, never pushes, and asks before merging unless you pass `--yes`. Its git commands never prompt for credentials, refuse the `ext::` protocol, and give up after 120 seconds. |
+| **Private Local State** | `~/.hivemind/cluster.json` and the run files in `~/.hivemind/runs/` are written owner-only (`0600` on Linux/macOS), and `hive` refuses to write them through symlinks. Worker replies are checked before they are saved: malformed status or log payloads are rejected, and a finished run never goes back to running. |
 | **Private-Network Allowlist** | Workers only accept connections from loopback, private LAN ranges and Tailscale (`100.64.0.0/10`); public internet addresses get HTTP 403 (configurable via `allowed_networks`). |
 | **Browser & DNS-Rebinding Protection** | Workers serve no CORS, reject browser-originated requests (`Origin` / cross-site `Sec-Fetch-Site`), and only accept `Host` values that are IPs, the machine's own names, or its Tailscale MagicDNS name. |
 | **Workspace Confinement** | Each run gets its own directory (`~/hive-workspace/<run_id>`) that the run ID cannot escape. This is not a sandbox; see the warning below. |
 | **Stripped Subprocess Environment** | Worker subprocesses run with only essential system variables. AI provider keys are put in the agent's environment only, not in test, benchmark or git commands. This keeps them out of environment dumps; it is not isolation. |
-| **Agent Cannot Hijack Git** | After the agent exits, the worker removes any git hooks it planted and restores `.git/config`, then commits and pushes with hooks disabled. |
+| **Agent Cannot Hijack Git** | Every run starts from a fresh clone. After the agent exits, the worker removes any git hooks it planted and restores `.git/config`; every worker git command runs with hooks disabled and the `ext::` protocol blocked. Since hivemind-worker 1.0.1 the agent's changes are committed before the tests run, and only that commit is pushed: files or commits the test command creates never reach origin. |
+| **Bounded Agent Access (`hive mcp`)** | An agent using the MCP tools can dispatch, cancel and merge into a local clone, but never push, create or read the fleet key, or add a worker without your approval through an elicitation form it cannot fill in itself. Worker machines never get these tools. |
 | **Tailscale Mesh Encryption** | When communicating over Tailscale (`100.x.x.x`), all peer-to-peer traffic is end-to-end encrypted with WireGuard. |
 
 > [!WARNING]
@@ -485,12 +593,25 @@ nssm start HiveMindWorker
 
 ## 9. Development & Tests
 
-Tests live in `tests/` and use pytest. They run fully offline: worker HTTP calls go through an in-memory `httpx` transport, and git tests use temporary local repositories. Your real `~/.hivemind` is never touched.
+Tests live in `tests/` and use pytest. They run fully offline: worker HTTP calls go through an in-memory `httpx` transport, git tests use temporary local repositories, and the MCP tests (`tests/test_mcp.py`) drive `hive mcp` in-process through the MCP client, including the approval form. Your real `~/.hivemind` is never touched.
 
 ```bash
 uv run pytest            # creates .venv with the dev dependency group on first run
 uv run pytest -k merge   # run a subset
+uv run pytest tests/test_mcp.py
 ```
+
+### Continuous integration
+
+GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs the same suite for every pull request and every push to `main`:
+
+| | |
+|---|---|
+| Machines | `ubuntu-latest` and `windows-latest` |
+| Python | 3.10 (the minimum) and 3.13 |
+| Steps | `uv sync`, then `uv run pytest -q`, with a throwaway git identity for the test repositories |
+
+Each PR shows four checks, `pytest (<os>, <python>)`; results are on the repository's **Actions** tab and in the badge at the top of this file. Any `test_*.py` file you add under `tests/` runs automatically. Keep tests offline: anything that needs a real worker, Tailscale or an AI engine fails on GitHub's machines. Live fleet testing is done by hand, for example with the [hive-test](https://github.com/lakshya076/hive-test) tasks.
 
 ---
 

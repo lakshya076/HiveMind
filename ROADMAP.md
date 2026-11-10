@@ -189,11 +189,10 @@ Layer 1 ─ GIT ORIGIN  (GitHub / GitLab / self-hosted)
 
 ### Key Deliverables:
 
-- [ ] **`hive` MCP Server** (`src/hivemind/mcp/`):
-  - Expose three MCP tools callable by any MCP-compatible agent:
-    - `hive_dispatch(prompt, strategies, repo, test_cmd, workers)` — starts a swarm run, returns `run_id`.
-    - `hive_status(run_id?)` — returns structured JSON.
-    - `hive_merge(worker_id, run_id?)` — fetches and merges the winning branch; returns the merged diff.
+- [x] **`hive` MCP Server** (`src/hivemind/mcp/`, started with `hive mcp` over stdio):
+  - Run tools: `hive_dispatch`, `hive_status`, `hive_logs`, `hive_cancel`, and `hive_merge` (preview, then `confirm=true`; local only, never pushes).
+  - Read-only tools: `hive_list`, `hive_check`, `hive_runs`, `hive_discover`.
+  - `hive_add_workers` adds machines only after the human ticks them in an MCP elicitation form. `hive keygen` is not exposed.
 - [ ] **Master Agent System Prompt / Rules**: Reusable rule file for autonomous swarm decisions.
 - [ ] **Autonomous Dispatch — Poll — Merge Loop**: Autonomous agent pipeline that only requires human interaction at the final push.
 - [ ] **Task Decomposition Prompt**: Autonomous generation of diverse implementation strategies.
