@@ -971,5 +971,19 @@ def logs_cmd(worker_choice: Optional[str], run_id: Optional[str], full: bool, lo
         sys.exit(1)
 
 
+@cli.command(name="mcp")
+def mcp_cmd():
+    """Serve the hive tools to an AI agent over MCP (stdio).
+
+    Register it once, e.g. `claude mcp add hive -- hive mcp`. The agent can check, dispatch,
+    follow, cancel and merge runs locally; it cannot create keys, and adding workers asks you.
+    """
+    try:
+        from hivemind.mcp.server import main  # imported here so other commands don't load the MCP SDK
+    except ModuleNotFoundError as exc:
+        _fail(f"{escape(str(exc))}. Reinstall hivemind to get its dependencies, e.g. [bold white]pip install -e .[/bold white]")
+    main()
+
+
 if __name__ == "__main__":
     cli()
