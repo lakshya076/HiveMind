@@ -203,7 +203,8 @@ def test_dispatch_engine_rejects_unknown(runner, fleet_key, fake_http):
     assert fake_http.requests == []
 
 
-def test_merge_non_interactive(runner, fleet_key, fake_http, origin_repo, tmp_path, git, monkeypatch):
+@pytest.mark.parametrize("args", [["--worker", "ari", "--yes"], ["--yes"]])
+def test_merge_non_interactive(runner, fleet_key, fake_http, origin_repo, tmp_path, git, monkeypatch, args):
     origin, local = origin_repo
     branch = f"exp/{RUN_ID}/ari-simd"
     worker = tmp_path / "w"
@@ -219,10 +220,20 @@ def test_merge_non_interactive(runner, fleet_key, fake_http, origin_repo, tmp_pa
     fake_http.handler = lambda request: httpx.Response(200, json={"status": "succeeded", "branch": branch, "pushed": True})
     monkeypatch.chdir(local)
 
-    result = runner.invoke(cli, ["merge", "--worker", "ari", "--yes"], input="")
+    result = runner.invoke(cli, ["merge", *args], input="")
 
     assert result.exit_code == 0, result.output
     assert (local / "f.py").exists()
+
+
+def test_merge_yes_never_picks_a_failed_strategy(runner, fleet_key, fake_http):
+    save_run(slot("simd", 1, status="failed", pushed=True))
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "failed", "pushed": True})
+
+    result = runner.invoke(cli, ["merge", "--yes"], input="")
+
+    assert result.exit_code == 1
+    assert "No strategy succeeded" in result.output
 
 
 def test_check_treats_claude_alias_as_claude_code(runner, fleet_key, fake_http):

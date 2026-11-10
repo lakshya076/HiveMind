@@ -336,10 +336,11 @@ Run from your local development repository clone:
 cd ~/workspace/my-project
 hive merge
 hive merge --worker ari:simd --yes   # Non-interactive: pick the winner and skip the confirmation
+hive merge --yes                     # Non-interactive: merge the first succeeded strategy
 ```
 
 1. Refreshes the run and displays the worker results with test outcomes.
-2. Prompts you to pick the winning worker (default: the first `succeeded` one). When one worker ran several strategies, pick with `<worker>:<strategy>`, e.g. `ari:simd`. Workers that are still running, ended `no_changes` or `cancelled`, or report `pushed: false` are not offered.
+2. Prompts you to pick the winning worker (default: the first `succeeded` one). With `--yes` and no `--worker`, it takes that default without asking, and exits with an error if no strategy succeeded (pass `--worker` to merge a failed one anyway). When one worker ran several strategies, pick with `<worker>:<strategy>`, e.g. `ari:simd`. Workers that are still running, ended `no_changes` or `cancelled`, or report `pushed: false` are not offered.
 3. Fetches the winning branch (`exp/<run_id>/<worker>-<strategy>`) from the Git remote.
 4. Previews the commits and `git diff --stat` against your base branch.
 5. After you confirm, checks out the base branch and merges with `git merge --no-ff` (message `hive: merge <branch> from <run_id>`). It does not push; run `git push` when you are happy.

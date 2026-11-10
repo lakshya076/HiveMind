@@ -802,7 +802,10 @@ def _run_context(run_id: Optional[str], cluster: Optional[str]) -> tuple[RunStat
 @cli.command(name="merge")
 @click.option("--run", "run_id", default=None, help="Run id (default: latest).")
 @click.option("--worker", "worker_choice", default=None, help="Winner to merge (id, or id:strategy); skips the prompt.")
-@click.option("--yes", "-y", is_flag=True, default=False, help="Merge without asking for confirmation.")
+@click.option(
+    "--yes", "-y", is_flag=True, default=False,
+    help="Merge without prompts; without --worker, takes the first succeeded strategy.",
+)
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cluster: Optional[str]):
     """Fetch a winning exp/* branch from origin and merge it into local main."""
@@ -822,10 +825,17 @@ def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cl
 
     if worker_choice is None:
         default_w = next((w for w in finished if w.status == "succeeded"), finished[0])
-        worker_choice = Prompt.ask(
-            "Worker to merge (id, or id:strategy when a worker ran several)",
-            default=_worker_label(run, default_w),
-        )
+        if yes:
+            # Never merge a failed strategy unattended.
+            if default_w.status != "succeeded":
+                _fail("No strategy succeeded. Pass --worker to merge one anyway.")
+            worker_choice = _worker_label(run, default_w)
+            console.print(f"Merging [bold]{escape(worker_choice)}[/bold] (first succeeded strategy).")
+        else:
+            worker_choice = Prompt.ask(
+                "Worker to merge (id, or id:strategy when a worker ran several)",
+                default=_worker_label(run, default_w),
+            )
     winner = _pick_worker(run, worker_choice, finished)
 
     try:
