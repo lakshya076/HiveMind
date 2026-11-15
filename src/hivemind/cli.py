@@ -35,18 +35,22 @@ from hivemind.runner.dispatch import (
     assign_strategies,
     dispatch_run,
     resolve_repo_url,
+    retry_run,
     select_workers,
 )
 from hivemind.runner.merge import (
     MergeError,
     default_winner,
+    delete_remote_exp_branches,
+    list_remote_exp_branches,
     mergeable_workers,
     pick_worker,
     prepare_merge,
+    prune_local_runs,
     run_merge,
     worker_label,
 )
-from hivemind.runner.remote import LOG_FILES, cancel_worker_job, fetch_worker_log
+from hivemind.runner.remote import LOG_FILES, cancel_worker_job, fetch_worker_log, fetch_worker_runs
 from hivemind.runner.state import RunState, WorkerRunState
 from hivemind.runner.status import TERMINAL_STATUSES, refresh_run, worker_node_for
 
@@ -930,13 +934,25 @@ def _run_context(run_id: Optional[str], cluster: Optional[str]) -> tuple[RunStat
 @cli.command(name="merge")
 @click.option("--run", "run_id", default=None, help="Run id (default: latest).")
 @click.option("--worker", "worker_choice", default=None, help="Winner to merge (id, or id:strategy); skips the prompt.")
+@click.option("--rank-by", "rank_by", default=None, help="Pick the default winner by a numeric benchmark JSON key.")
+@click.option("--min", "higher_is_better", flag_value=False, default=False, help="Smaller benchmark value wins (default with --rank-by).")
+@click.option("--max", "higher_is_better", flag_value=True, help="Larger benchmark value wins with --rank-by.")
+@click.option("--pr", "open_pr", is_flag=True, default=False, help="Open a GitHub pull request from the winning exp/* branch instead of merging locally.")
 @click.option(
     "--yes", "-y", is_flag=True, default=False,
-    help="Merge without prompts; without --worker, takes the first succeeded strategy.",
+    help="Merge without prompts; without --worker, takes the first succeeded strategy (or best --rank-by).",
 )
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
-def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cluster: Optional[str]):
-    """Fetch a winning exp/* branch from origin and merge it into local main."""
+def merge_cmd(
+    run_id: Optional[str],
+    worker_choice: Optional[str],
+    rank_by: Optional[str],
+    higher_is_better: bool,
+    open_pr: bool,
+    yes: bool,
+    cluster: Optional[str],
+):
+    """Fetch a winning exp/* branch from origin and merge it into local main (or open a PR with --pr)."""
     run, workers_by_id = _run_context(run_id, cluster)
     run = refresh_run(run, workers_by_id)
     _print_run_table(run, title=f"Pick a winner for {run.run_id}")
@@ -946,13 +962,17 @@ def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cl
         _fail("No worker branches are available to merge yet.")
 
     if worker_choice is None:
-        default_w = default_winner(finished)
+        try:
+            default_w = default_winner(finished, rank_by=rank_by, higher_is_better=higher_is_better)
+        except MergeError as exc:
+            _fail(escape(str(exc)))
         if yes:
             # Never merge a failed strategy unattended.
             if default_w.status != "succeeded":
                 _fail("No strategy succeeded. Pass --worker to merge one anyway.")
             worker_choice = worker_label(run, default_w)
-            console.print(f"Merging [bold]{escape(worker_choice)}[/bold] (first succeeded strategy).")
+            reason = f"best {rank_by}" if rank_by else "first succeeded strategy"
+            console.print(f"Merging [bold]{escape(worker_choice)}[/bold] ({escape(reason)}).")
         else:
             worker_choice = Prompt.ask(
                 "Worker to merge (id, or id:strategy when a worker ran several)",
@@ -961,7 +981,7 @@ def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cl
     winner = _pick_worker(run, worker_choice, finished)
 
     try:
-        plan = prepare_merge(run, winner)
+        plan = prepare_merge(run, winner, allow_dirty=open_pr)
     except MergeError as exc:
         _fail(escape(str(exc)))
 
@@ -973,6 +993,33 @@ def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cl
     ))
 
     base = plan.base
+    if open_pr:
+        if not yes and not Confirm.ask(f"Open a pull request from [bold]{winner.branch}[/bold] into [bold]{base}[/bold]?", default=True):
+            console.print("[dim]PR creation cancelled.[/dim]")
+            return
+        pr_title = f"hive: {winner.strategy} ({run.run_id})"
+        pr_body = (
+            f"Strategy `{winner.strategy}` on `{winner.worker_id}` from run `{run.run_id}`.\n\n"
+            f"### Prompt\n{run.prompt[:2000]}\n"
+        )
+        try:
+            res = subprocess.run(
+                ["gh", "pr", "create", "--head", winner.branch, "--base", base, "--title", pr_title, "--body", pr_body],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            _fail("GitHub CLI ('gh') is not installed or not on PATH.")
+        if res.returncode != 0:
+            _fail(escape((res.stderr or res.stdout).strip() or f"gh pr create exited with {res.returncode}"))
+        pr_url = (res.stdout or "").strip()
+        console.print(Panel.fit(
+            f"[bold green]Pull request opened:[/bold green] [white]{escape(pr_url)}[/white]",
+            border_style="green",
+        ))
+        return
+
     if not yes and not Confirm.ask(f"Merge [bold]{winner.branch}[/bold] into local [bold]{base}[/bold]?", default=True):
         console.print("[dim]Merge cancelled.[/dim]")
         return
@@ -987,6 +1034,111 @@ def merge_cmd(run_id: Optional[str], worker_choice: Optional[str], yes: bool, cl
         "[dim]Push to origin when you are ready.[/dim]",
         border_style="green",
     ))
+
+
+@cli.command(name="diff")
+@click.argument("worker_choice", required=False)
+@click.option("--run", "run_id", default=None, help="Run id (default: latest).")
+@click.option("--stat", "stat_only", is_flag=True, default=False, help="Show only the commit list and diffstat.")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def diff_cmd(worker_choice: Optional[str], run_id: Optional[str], stat_only: bool, cluster: Optional[str]):
+    """Preview commits and diff of a worker's exp/* branch against the base branch."""
+    run, workers_by_id = _run_context(run_id, cluster)
+    run = refresh_run(run, workers_by_id)
+    candidates = mergeable_workers(run)
+    if not candidates:
+        _fail("No worker branches are available to diff yet.")
+    winner = _pick_worker(run, worker_choice, candidates) if worker_choice else default_winner(candidates)
+    try:
+        plan = prepare_merge(run, winner, allow_dirty=True, include_patch=not stat_only)
+    except MergeError as exc:
+        _fail(escape(str(exc)))
+
+    console.print(Panel(
+        (escape(plan.commits) if plan.commits else "[dim]no commits on branch[/dim]") + "\n" + escape(plan.diff_stat or ""),
+        title=f"origin/{winner.branch} vs {plan.compare_base}",
+        border_style="blue",
+    ))
+    if not stat_only and plan.patch:
+        console.print(plan.patch, markup=False, highlight=False)
+
+
+@cli.command(name="clean")
+@click.option("--run", "run_id", default=None, help="Only clean exp/<run_id>/* branches (default: all exp/* branches).")
+@click.option("--repo", "repo_url", default=None, help="Git origin URL (default: repo from run or cluster.json).")
+@click.option("--prune-runs", is_flag=True, default=False, help="Also prune local run files in ~/.hivemind/runs/.")
+@click.option("--keep", default=20, show_default=True, type=click.IntRange(min=0), help="Number of recent local runs to keep with --prune-runs.")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Delete without interactive confirmation.")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def clean_cmd(
+    run_id: Optional[str],
+    repo_url: Optional[str],
+    prune_runs: bool,
+    keep: int,
+    yes: bool,
+    cluster: Optional[str],
+):
+    """List and delete exp/* branches on origin, and optionally prune ~/.hivemind/runs/."""
+    resolved_repo = repo_url
+    if not resolved_repo and run_id:
+        try:
+            resolved_repo = RunState.load(run_id).repo_url
+        except (FileNotFoundError, ValueError):
+            pass
+    if not resolved_repo:
+        cfg = _load_config(cluster, required=False)
+        if cfg and cfg.repo_url:
+            resolved_repo = cfg.repo_url
+    if not resolved_repo:
+        try:
+            resolved_repo = RunState.load_latest().repo_url
+        except (FileNotFoundError, ValueError):
+            _fail("No git origin found. Pass --repo or set repo_url in cluster.json.")
+
+    try:
+        branches = list_remote_exp_branches(resolved_repo, run_id=run_id)
+    except MergeError as exc:
+        _fail(escape(str(exc)))
+
+    if not branches and not prune_runs:
+        console.print("[dim]No remote exp/* branches found to clean.[/dim]")
+        return
+
+    if branches:
+        console.print(f"[bold yellow]Remote exp/* branches on {escape(resolved_repo)} ({len(branches)}):[/bold yellow]")
+        for b in branches:
+            console.print(f"  - {escape(b)}")
+        if yes or Confirm.ask(f"Delete {len(branches)} branch(es) from origin?", default=False):
+            try:
+                delete_remote_exp_branches(resolved_repo, branches)
+            except MergeError as exc:
+                _fail(escape(str(exc)))
+            console.print(f"[bold green]Deleted {len(branches)} remote branch(es).[/bold green]")
+        else:
+            console.print("[dim]Skipped deleting remote branches.[/dim]")
+
+    if prune_runs:
+        deleted_runs = prune_local_runs(keep=keep, run_id=run_id)
+        console.print(f"[green]Pruned {len(deleted_runs)} local run file(s).[/green]")
+
+
+@cli.command(name="retry")
+@click.option("--run", "run_id", default=None, help="Run id to retry (default: latest).")
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
+def retry_cmd(run_id: Optional[str], cluster: Optional[str]):
+    """Re-dispatch only the failed and unknown strategies of a saved run."""
+    run, workers_by_id = _run_context(run_id, cluster)
+    run = refresh_run(run, workers_by_id)
+    config = _load_config(cluster, required=False)
+    try:
+        run = retry_run(config, run)
+    except DispatchError as exc:
+        _fail(escape(str(exc)))
+    console.print(Panel.fit(
+        f"[bold green]Retried failed/unknown strategies for run {run.run_id}[/bold green]",
+        border_style="green",
+    ))
+    _print_run_table(run)
 
 
 @cli.command(name="cancel")
@@ -1034,10 +1186,39 @@ def cancel_cmd(run_id: Optional[str], worker_choice: Optional[str], cluster: Opt
 
 @cli.command(name="runs")
 @click.option("--limit", "-n", default=20, show_default=True, type=click.IntRange(min=1), help="How many runs to show.")
+@click.option("--remote", is_flag=True, default=False, help="Query worker daemons (GET /runs) to include runs missing locally.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Print runs as JSON.")
-def runs_cmd(limit: int, as_json: bool):
-    """List saved runs, newest first. Statuses are as of the last status/merge; workers are not contacted."""
+@click.option("--cluster", "-c", default=None, help="Path to cluster configuration file (used with --remote).")
+def runs_cmd(limit: int, remote: bool, as_json: bool, cluster: Optional[str]):
+    """List saved runs, newest first. Pass --remote to also list runs reported by worker daemons."""
     runs = RunState.load_all()
+    remote_runs: list[dict[str, Any]] = []
+    if remote:
+        if not _require_fleet_key():
+            sys.exit(1)
+        config = _load_config(cluster)
+        known_remote_ids = {
+            (w.worker_id, w.remote_run_dir or r.run_id)
+            for r in runs
+            for w in r.workers
+        } | {(w.worker_id, r.run_id) for r in runs for w in r.workers}
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(config.workers)))) as pool:
+            fetched = list(pool.map(fetch_worker_runs, config.workers))
+        for worker, (w_runs, _err) in zip(config.workers, fetched):
+            for wr in w_runs or []:
+                rid = str(wr.get("run_id") or "")
+                if not rid:
+                    continue
+                remote_runs.append({
+                    "worker_id": worker.id,
+                    "run_id": rid,
+                    "status": wr.get("status", "unknown"),
+                    "strategy": wr.get("strategy", "-"),
+                    "branch": wr.get("branch", "-"),
+                    "started_at": wr.get("started_at"),
+                    "local_known": (worker.id, rid) in known_remote_ids,
+                })
+
     if as_json:
         out = []
         for run in runs[:limit]:
@@ -1051,34 +1232,59 @@ def runs_cmd(limit: int, as_json: bool):
                 "strategies": len(run.workers),
                 "statuses": counts,
             })
-        click.echo(json.dumps({"runs": out}, indent=2))
+        payload: dict[str, Any] = {"runs": out}
+        if remote:
+            payload["remote_runs"] = remote_runs[:limit]
+        click.echo(json.dumps(payload, indent=2))
         return
-    if not runs:
+
+    if not runs and not remote_runs:
         console.print("[dim]No runs yet. Start one with[/dim] [bold white]hive dispatch[/bold white].")
         return
 
-    table = Table(title=f"HiveMind Runs ({min(limit, len(runs))} of {len(runs)})", border_style="cyan")
-    table.add_column("Run ID", style="bold white", no_wrap=True)
-    table.add_column("Created (UTC)", style="dim", no_wrap=True)
-    table.add_column("Strategies", justify="center")
-    table.add_column("Status")
-    table.add_column("Prompt")
-    for run in runs[:limit]:
-        counts: dict[str, int] = {}
-        for w in run.workers:
-            counts[w.status] = counts.get(w.status, 0) + 1
-        summary = ", ".join(f"{n} {_status_style(s)}" for s, n in sorted(counts.items()))
-        prompt = run.prompt.replace("\n", " ")
-        table.add_row(
-            run.run_id,
-            run.created_at.replace("T", " ")[:16],
-            str(len(run.workers)),
-            summary or "[dim]-[/dim]",
-            escape(prompt if len(prompt) <= 60 else prompt[:57] + "..."),
-        )
-    console.print()
-    console.print(table)
-    console.print()
+    if runs:
+        table = Table(title=f"HiveMind Runs ({min(limit, len(runs))} of {len(runs)})", border_style="cyan")
+        table.add_column("Run ID", style="bold white", no_wrap=True)
+        table.add_column("Created (UTC)", style="dim", no_wrap=True)
+        table.add_column("Strategies", justify="center")
+        table.add_column("Status")
+        table.add_column("Prompt")
+        for run in runs[:limit]:
+            counts: dict[str, int] = {}
+            for w in run.workers:
+                counts[w.status] = counts.get(w.status, 0) + 1
+            summary = ", ".join(f"{n} {_status_style(s)}" for s, n in sorted(counts.items()))
+            prompt = run.prompt.replace("\n", " ")
+            table.add_row(
+                run.run_id,
+                run.created_at.replace("T", " ")[:16],
+                str(len(run.workers)),
+                summary or "[dim]-[/dim]",
+                escape(prompt if len(prompt) <= 60 else prompt[:57] + "..."),
+            )
+        console.print()
+        console.print(table)
+        console.print()
+
+    if remote and remote_runs:
+        rtable = Table(title=f"Remote Worker Runs ({min(limit, len(remote_runs))} of {len(remote_runs)})", border_style="magenta")
+        rtable.add_column("Worker", style="bold white")
+        rtable.add_column("Remote Run ID", style="cyan")
+        rtable.add_column("Strategy", style="magenta")
+        rtable.add_column("Branch", style="green")
+        rtable.add_column("Status", justify="center")
+        rtable.add_column("Tracked Locally", justify="center")
+        for rr in remote_runs[:limit]:
+            rtable.add_row(
+                escape(str(rr["worker_id"])),
+                escape(str(rr["run_id"])),
+                escape(str(rr["strategy"])),
+                escape(str(rr["branch"] or "-")),
+                _status_style(str(rr["status"])),
+                "[green]yes[/green]" if rr["local_known"] else "[yellow]lost/remote-only[/yellow]",
+            )
+        console.print(rtable)
+        console.print()
 
 
 @cli.command(name="logs")

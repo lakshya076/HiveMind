@@ -465,3 +465,58 @@ def dispatch_run(
     run.workers = [item for item in results if item is not None]
     run.save()
     return run
+
+
+def retry_run(config: Optional[ClusterConfig], run: RunState) -> RunState:
+    """Re-dispatch only the ``failed`` and ``unknown`` slots of ``run``."""
+    retry_indices = [
+        idx for idx, w in enumerate(run.workers)
+        if w.status in ("failed", "unknown")
+    ]
+    if not retry_indices:
+        raise DispatchError(f"Run {run.run_id} has no failed or unknown strategies to retry.")
+
+    workers_by_id = {w.id: w for w in config.workers} if config else {}
+    total_count = len(run.workers)
+
+    def relaunch(idx: int) -> WorkerRunState:
+        ws = run.workers[idx]
+        cluster_w = workers_by_id.get(ws.worker_id)
+        node = WorkerNode(
+            id=ws.worker_id,
+            host=cluster_w.host if cluster_w else ws.host,
+            port=cluster_w.port if cluster_w else (ws.port or 7422),
+            agent_engine=ws.agent_engine if ws.agent_engine in SUPPORTED_ENGINES else "claude-code",
+        )
+        remote_id = ws.remote_run_dir or f"{run.run_id}-{idx + 1}"
+        return start_worker_job(
+            node,
+            run_id=run.run_id,
+            remote_run_id=remote_id,
+            repo_url=run.repo_url,
+            prompt=run.prompt,
+            strategy=ws.strategy,
+            strategy_hint=ws.strategy_hint,
+            strategy_index=idx + 1,
+            strategy_count=total_count,
+            test_command=run.test_command,
+            bench_command=run.bench_command,
+            model=ws.model or run.model,
+            base_branch=run.base_branch,
+            protect_paths=run.protect_paths,
+            timeout=run.timeout,
+        )
+
+    with ThreadPoolExecutor(max_workers=max(1, len(retry_indices))) as pool:
+        futures = {pool.submit(relaunch, idx): idx for idx in retry_indices}
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                run.workers[idx] = future.result()
+            except Exception as exc:  # noqa: BLE001
+                run.workers[idx].status = "failed"
+                run.workers[idx].error = str(exc)
+
+    run.save()
+    return run
+

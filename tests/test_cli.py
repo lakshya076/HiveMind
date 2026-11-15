@@ -298,3 +298,81 @@ def test_dispatch_prompt_file_and_stdin(runner, fleet_key, fake_http, tmp_path):
     assert RunState.load_latest().prompt == "solve from stdin"
 
 
+def test_merge_rank_by_diff_clean_retry_and_pr(
+    runner, fleet_key, fake_http, origin_repo, tmp_path, git, monkeypatch
+):
+    import subprocess as sp
+
+    origin, local = origin_repo
+    fast_branch = f"exp/{RUN_ID}/ari-fast"
+    slow_branch = f"exp/{RUN_ID}/ari-slow"
+    push_worker_branch(tmp_path, origin, git, fast_branch, message="hive: fast")
+    (tmp_path / "s").mkdir()
+    push_worker_branch(tmp_path / "s", origin, git, slow_branch, message="hive: slow")
+
+    run = RunState(
+        run_id=RUN_ID,
+        prompt="speed up",
+        repo_url=str(origin),
+        workers=[
+            WorkerRunState(
+                worker_id="ari",
+                host="10.0.0.2",
+                agent_engine="aider",
+                strategy="slow",
+                branch=slow_branch,
+                remote_run_dir=f"{RUN_ID}-1",
+                status="succeeded",
+                pushed=True,
+                benchmark_data={"ms": 50.0},
+            ),
+            WorkerRunState(
+                worker_id="ari",
+                host="10.0.0.2",
+                agent_engine="aider",
+                strategy="fast",
+                branch=fast_branch,
+                remote_run_dir=f"{RUN_ID}-2",
+                status="succeeded",
+                pushed=True,
+                benchmark_data={"ms": 10.0},
+            ),
+        ],
+    )
+    run.save()
+
+    def handler(request):
+        if request.url.path.endswith("-1"):
+            return httpx.Response(200, json={"status": "succeeded", "branch": slow_branch, "pushed": True, "benchmark_data": {"ms": 50.0}})
+        if request.url.path.endswith("-2"):
+            return httpx.Response(200, json={"status": "succeeded", "branch": fast_branch, "pushed": True, "benchmark_data": {"ms": 10.0}})
+        return httpx.Response(200, json={"status": "starting"})
+
+    fake_http.handler = handler
+    monkeypatch.chdir(local)
+
+    res_diff = runner.invoke(cli, ["diff", "ari:fast"])
+    assert res_diff.exit_code == 0, res_diff.output
+    assert "FEATURE = True" in res_diff.output
+
+    orig_run = sp.run
+    gh_calls = []
+
+    def fake_run(args, *a, **kw):
+        if isinstance(args, list) and args and args[0] == "gh":
+            gh_calls.append(args)
+            return sp.CompletedProcess(args, 0, "https://github.com/me/repo/pull/99\n", "")
+        return orig_run(args, *a, **kw)
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    res_pr = runner.invoke(cli, ["merge", "--rank-by", "ms", "--min", "--pr", "--yes"])
+    assert res_pr.exit_code == 0, res_pr.output
+    assert "https://github.com/me/repo/pull/99" in res_pr.output
+    assert gh_calls and fast_branch in gh_calls[0]
+
+    res_clean = runner.invoke(cli, ["clean", "--run", RUN_ID, "--yes"])
+    assert res_clean.exit_code == 0, res_clean.output
+    assert "Deleted 2 remote branch(es)" in res_clean.output
+
+
+
