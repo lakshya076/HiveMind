@@ -211,3 +211,57 @@ def test_dispatch_run_rejects_empty_prompt(fake_http):
     with pytest.raises(DispatchError):
         dispatch_run(CLUSTER, "   ", repo_url="r", workers=[ARI], strategies=["a"])
     assert fake_http.requests == []
+
+
+def test_select_workers_filters_by_required_tags():
+    w1 = WorkerNode(id="ari", host="10.0.0.1", capabilities=["gpu", "high-cpu"])
+    w2 = WorkerNode(id="hermes", host="10.0.0.2", capabilities=["standard-cpu"])
+    cfg = ClusterConfig(workers=[w1, w2])
+    assert select_workers(cfg, None, required_tags=["GPU"]) == [w1]
+    with pytest.raises(DispatchError, match="No workers match"):
+        select_workers(cfg, None, required_tags=["tpu"])
+
+
+def test_per_strategy_engine_model_hint_and_timeout(fleet_key, fake_http):
+    def handler(request):
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                json={"status": "ready", "engines": ["aider", "claude-code"], "features": ["strategy_hint", "timeout"]},
+            )
+        return httpx.Response(200, json={"status": "starting"})
+
+    fake_http.handler = handler
+    slot_workers, strategies = assign_strategies(
+        [ARI, HERMES],
+        ["simd@aider:gpt-4o=use AVX2 intrinsics", "actor@claude-code=use lock-free queue"],
+    )
+    run = dispatch_run(
+        CLUSTER,
+        "optimize loop",
+        repo_url="https://x/y.git",
+        workers=slot_workers,
+        strategies=strategies,
+        timeout=300.0,
+    )
+    dispatches = sorted(
+        (json.loads(r.content) for r in fake_http.requests if r.url.path == "/dispatch"),
+        key=lambda b: b["strategy_index"],
+    )
+    assert dispatches[0]["strategy"] == "simd"
+    assert dispatches[0]["agent_engine"] == "aider"
+    assert dispatches[0]["model"] == "gpt-4o"
+    assert dispatches[0]["strategy_hint"] == "use AVX2 intrinsics"
+    assert dispatches[0]["agent_timeout"] == 300.0
+    assert dispatches[1]["strategy"] == "actor"
+    assert dispatches[1]["agent_engine"] == "claude-code"
+    assert dispatches[1]["strategy_hint"] == "use lock-free queue"
+    assert run.timeout == 300.0
+
+
+def test_engine_preflight_refuses_missing_engine(fleet_key, fake_http):
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "ready", "engines": ["claude-code"]})
+    slot_workers, strategies = assign_strategies([ARI], ["simd@aider"])
+    with pytest.raises(DispatchError, match="not installed"):
+        dispatch_run(CLUSTER, "fix", repo_url="https://x/y.git", workers=slot_workers, strategies=strategies)
+

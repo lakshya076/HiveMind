@@ -29,7 +29,9 @@ from hivemind.config.cluster import (
     merge_workers,
 )
 from hivemind.runner.dispatch import (
+    MAX_PROMPT_CHARS,
     DispatchError,
+    _copy_worker_slot,
     assign_strategies,
     dispatch_run,
     resolve_repo_url,
@@ -715,10 +717,28 @@ def check_cmd(cluster: Optional[str], as_json: bool):
 
 
 @cli.command(name="dispatch")
-@click.argument("prompt", required=True)
+@click.argument("prompt", required=False, default=None)
+@click.option(
+    "--prompt-file",
+    "-f",
+    "prompt_file",
+    default=None,
+    help="Read the task prompt from a file (or '-' for stdin).",
+)
 @click.option("--repo", "repo_url", default=None, help="Git origin URL (default: repo_url from cluster.json).")
 @click.option("--workers", "worker_ids_csv", default=None, help="Comma-separated worker ids to use (default: all).")
-@click.option("--strategy", "strategies", multiple=True, help="Named strategy (repeatable). Default: strategy-1..N.")
+@click.option(
+    "--require",
+    "required_tags",
+    multiple=True,
+    help="Only use workers that have this capability tag (repeatable).",
+)
+@click.option(
+    "--strategy",
+    "strategies",
+    multiple=True,
+    help="Named strategy (repeatable), optionally name[@engine[:model]][=hint]. Default: strategy-1..N.",
+)
 @click.option("--test", "test_command", default=None, help="Command to run after agent finishes (e.g. 'pytest -q').")
 @click.option("--bench", "bench_command", default=None, help="Benchmark command producing a JSON output.")
 @click.option("--model", default=None, help="Model override for the worker engine.")
@@ -741,11 +761,19 @@ def check_cmd(cluster: Optional[str], as_json: bool):
     help="File or directory (relative to the repo root, e.g. tests/) the agent must not change; "
     "the worker restores it before tests run (repeatable). Needs a worker with the protect feature.",
 )
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=1.0, max=86400.0),
+    default=None,
+    help="Per-dispatch agent timeout in seconds (clamped to each worker's configured ceiling).",
+)
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def dispatch_cmd(
-    prompt: str,
+    prompt: Optional[str],
+    prompt_file: Optional[str],
     repo_url: Optional[str],
     worker_ids_csv: Optional[str],
+    required_tags: tuple[str, ...],
     strategies: tuple[str, ...],
     test_command: Optional[str],
     bench_command: Optional[str],
@@ -753,26 +781,47 @@ def dispatch_cmd(
     engine: Optional[str],
     base_branch: Optional[str],
     protect_paths: tuple[str, ...],
+    timeout: Optional[float],
     cluster: Optional[str],
 ):
     """Start a parallel coding job on worker machines."""
+    if prompt is not None and prompt_file is not None:
+        _fail("Pass either a PROMPT argument or --prompt-file, not both.")
+    if prompt_file is not None:
+        if prompt_file == "-":
+            prompt_text = sys.stdin.read(MAX_PROMPT_CHARS + 1)
+        else:
+            p_path = Path(prompt_file).expanduser()
+            try:
+                with open(p_path, "r", encoding="utf-8") as fh:
+                    prompt_text = fh.read(MAX_PROMPT_CHARS + 1)
+            except (OSError, UnicodeDecodeError) as exc:
+                _fail(f"Could not read prompt file '{escape(str(p_path))}': {escape(str(exc))}")
+    elif prompt is not None:
+        prompt_text = prompt
+    else:
+        _fail("Missing prompt: pass a PROMPT argument or --prompt-file <path>.")
+
     if not _require_fleet_key():
         sys.exit(1)
     config = _load_config(cluster)
 
-    worker_ids =[wid.strip() for wid in worker_ids_csv.split(",")] if worker_ids_csv else None
+    worker_ids = [wid.strip() for wid in worker_ids_csv.split(",")] if worker_ids_csv else None
     try:
-        selected = select_workers(config, worker_ids)
+        selected = select_workers(config, worker_ids, required_tags=required_tags)
         slot_workers, assigned_strategies = assign_strategies(selected, strategies)
         resolved_repo = resolve_repo_url(config, repo_url)
     except DispatchError as exc:
         _fail(escape(str(exc)))
     if engine:
-        slot_workers = [w.model_copy(update={"agent_engine": engine}) for w in slot_workers]
+        slot_workers = [
+            w if getattr(w, "_engine_explicit", False) else _copy_worker_slot(w, engine=engine, engine_explicit=True)
+            for w in slot_workers
+        ]
 
     console.print(Panel.fit(
         f"[bold cyan]Dispatching Swarm Job[/bold cyan]\n"
-        f"[white]{escape(prompt)}[/white]\n"
+        f"[white]{escape(prompt_text[:200])}[/white]\n"
         f"[dim]Origin:[/dim] {escape(resolved_repo)}\n"
         f"[dim]Base:[/dim] {escape(base_branch or 'default branch')}\n"
         + (f"[dim]Protect:[/dim] {escape(', '.join(protect_paths))}\n" if protect_paths else "")
@@ -790,7 +839,7 @@ def dispatch_cmd(
         try:
             run = dispatch_run(
                 config,
-                prompt,
+                prompt_text,
                 repo_url=resolved_repo,
                 workers=slot_workers,
                 strategies=assigned_strategies,
@@ -799,6 +848,8 @@ def dispatch_cmd(
                 model=model,
                 base_branch=base_branch,
                 protect_paths=protect_paths,
+                timeout=timeout,
+                check_engines=bool(engine),
             )
         except DispatchError as exc:
             _fail(escape(str(exc)))

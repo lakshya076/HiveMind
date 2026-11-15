@@ -279,3 +279,22 @@ def test_json_flags_and_elapsed_diff_in_status(runner, fleet_key, fake_http, tmp
     assert res_runs.exit_code == 0, res_runs.output
     assert json.loads(res_runs.output)["runs"][0]["run_id"] == RUN_ID
 
+
+def test_dispatch_prompt_file_and_stdin(runner, fleet_key, fake_http, tmp_path):
+    ClusterConfig(
+        repo_url="git@github.com:me/repo.git",
+        workers=[WorkerNode(id="ari", host="10.0.0.2", capabilities=["gpu"])],
+    ).save()
+    fake_http.handler = lambda request: httpx.Response(200, json={"status": "starting"})
+
+    pfile = tmp_path / "task.txt"
+    pfile.write_text("solve from file\n", encoding="utf-8")
+    res = runner.invoke(cli, ["dispatch", "--prompt-file", str(pfile), "--require", "gpu"])
+    assert res.exit_code == 0, res.output
+    assert RunState.load_latest().prompt == "solve from file"
+
+    res_stdin = runner.invoke(cli, ["dispatch", "--prompt-file", "-"], input="solve from stdin\n")
+    assert res_stdin.exit_code == 0, res_stdin.output
+    assert RunState.load_latest().prompt == "solve from stdin"
+
+

@@ -29,6 +29,7 @@ from hivemind.discovery.scanner import DiscoveredDevice, NetworkScanner
 from hivemind.discovery.tailscale import TailscaleScanner
 from hivemind.runner.dispatch import (
     DispatchError,
+    _copy_worker_slot,
     assign_strategies,
     dispatch_run,
     resolve_repo_url,
@@ -164,6 +165,7 @@ def hive_dispatch(
     prompt: str,
     strategies: Optional[list[str]] = None,
     workers: Optional[list[str]] = None,
+    require: Optional[list[str]] = None,
     repo: Optional[str] = None,
     test: Optional[str] = None,
     bench: Optional[str] = None,
@@ -171,24 +173,30 @@ def hive_dispatch(
     engine: Optional[str] = None,
     base: Optional[str] = None,
     protect: Optional[list[str]] = None,
+    timeout: Optional[float] = None,
 ) -> dict[str, Any]:
     """Start a run: one strategy per entry in `strategies` (default one per worker), spread over `workers`
-    (default all). `test` is run after the agent (e.g. "pytest -q"); `bench` must print JSON metrics.
+    (default all, optionally filtered by `require` capability tags). Strategies support `name[@engine[:model]][=hint]`.
+    `test` is run after the agent (e.g. "pytest -q"); `bench` must print JSON metrics.
     `base` is a branch on origin to start from. `protect` lists files or directories (e.g. "tests/") the
     worker restores after the agent, so the agent cannot change the tests it is judged by.
+    `timeout` sets a per-dispatch agent timeout in seconds (clamped to the worker's ceiling).
     Returns the run, including its run_id."""
     _require_key()
     config = _config()
     if engine and engine not in SUPPORTED_ENGINES:
         raise ToolError(f"Unknown engine {engine!r}; use one of {', '.join(SUPPORTED_ENGINES)}")
     try:
-        slot_workers, names = assign_strategies(select_workers(config, workers), strategies or [])
+        slot_workers, names = assign_strategies(select_workers(config, workers, required_tags=require), strategies or [])
         repo_url = resolve_repo_url(config, repo)
         if engine:
-            slot_workers = [w.model_copy(update={"agent_engine": engine}) for w in slot_workers]
+            slot_workers = [
+                w if getattr(w, "_engine_explicit", False) else _copy_worker_slot(w, engine=engine, engine_explicit=True)
+                for w in slot_workers
+            ]
         run = dispatch_run(config, prompt, repo_url=repo_url, workers=slot_workers, strategies=names,
                            test_command=test, bench_command=bench, model=model, base_branch=base,
-                           protect_paths=protect)
+                           protect_paths=protect, timeout=timeout, check_engines=bool(engine))
     except DispatchError as exc:
         raise ToolError(str(exc)) from exc
     return _run_summary(run)
