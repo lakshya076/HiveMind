@@ -100,6 +100,9 @@ def refresh_run(
                     worker_state.base_branch = validate_base_branch(reported_base)
                 except DispatchError:
                     pass
+            reverted = payload.get("protected_reverted")
+            if isinstance(reverted, list):
+                worker_state.protected_reverted = [str(name) for name in reverted]
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
         elif worker_state.status not in TERMINAL_STATUSES:

@@ -166,10 +166,13 @@ def hive_dispatch(
     model: Optional[str] = None,
     engine: Optional[str] = None,
     base: Optional[str] = None,
+    protect: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Start a run: one strategy per entry in `strategies` (default one per worker), spread over `workers`
     (default all). `test` is run after the agent (e.g. "pytest -q"); `bench` must print JSON metrics.
-    `base` is a branch on origin to start from. Returns the run, including its run_id."""
+    `base` is a branch on origin to start from. `protect` lists files or directories (e.g. "tests/") the
+    worker restores after the agent, so the agent cannot change the tests it is judged by.
+    Returns the run, including its run_id."""
     _require_key()
     config = _config()
     if engine and engine not in SUPPORTED_ENGINES:
@@ -180,7 +183,8 @@ def hive_dispatch(
         if engine:
             slot_workers = [w.model_copy(update={"agent_engine": engine}) for w in slot_workers]
         run = dispatch_run(config, prompt, repo_url=repo_url, workers=slot_workers, strategies=names,
-                           test_command=test, bench_command=bench, model=model, base_branch=base)
+                           test_command=test, bench_command=bench, model=model, base_branch=base,
+                           protect_paths=protect)
     except DispatchError as exc:
         raise ToolError(str(exc)) from exc
     return _run_summary(run)

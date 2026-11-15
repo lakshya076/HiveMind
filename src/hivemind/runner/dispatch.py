@@ -12,6 +12,9 @@ _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
 # checked here so a mistake fails before any worker is contacted.
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,199}$")
 MAX_PROMPT_CHARS = 200_000
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+MAX_PROTECT_PATHS = 32
+MAX_PROTECT_PATH_CHARS = 512
 
 
 class DispatchError(ValueError):
@@ -54,7 +57,38 @@ def validate_base_branch(branch: Optional[str]) -> Optional[str]:
     return cleaned
 
 
-def workers_missing_feature(workers: Sequence[WorkerNode], feature: str) -> list[str]:
+def validate_protect_paths(paths: Optional[Sequence[str]]) -> Optional[list[str]]:
+    """Repo-relative files or directories the worker restores after the agent runs.
+
+    Same rules the worker enforces at /dispatch: backslashes count as separators, and
+    absolute paths, drive letters, '..', '.', '.git' and option-like paths are refused.
+    """
+    if not paths:
+        return None
+    if len(paths) > MAX_PROTECT_PATHS:
+        raise DispatchError(f"At most {MAX_PROTECT_PATHS} protect paths are allowed.")
+    cleaned_paths = []
+    for path in paths:
+        cleaned = (path or "").strip().replace("\\", "/").rstrip("/")
+        if (
+            not cleaned
+            or len(cleaned) > MAX_PROTECT_PATH_CHARS
+            or cleaned.startswith(("/", "-", ":"))
+            or _DRIVE_RE.match(cleaned)
+            or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in cleaned)
+            or any(part in ("", ".", "..", ".git") for part in cleaned.split("/"))
+        ):
+            raise DispatchError(
+                f"Invalid protect path {path!r}: use a path relative to the repository root, e.g. tests/ "
+                "(no '..', '.', '.git', leading '-' or '/', drive letter or control characters)."
+            )
+        cleaned_paths.append(cleaned)
+    return list(dict.fromkeys(cleaned_paths))
+
+
+def workers_missing_feature(
+    workers: Sequence[WorkerNode], feature: str, needs: str = "0.3.0 or later"
+) -> list[str]:
     """One problem line per distinct worker that doesn't advertise ``feature`` in /health.
 
     Workers ignore dispatch fields they don't know, so sending e.g. base_branch to an
@@ -69,7 +103,7 @@ def workers_missing_feature(workers: Sequence[WorkerNode], feature: str) -> list
         if not data:
             problems.append(f"{worker.id}: could not check ({err})")
         elif feature not in (data.get("features") or []):
-            problems.append(f"{worker.id}: hivemind-worker {data.get('version', '?')} does not support it (needs 0.3.0 or later)")
+            problems.append(f"{worker.id}: hivemind-worker {data.get('version', '?')} does not support it (needs {needs})")
     return problems
 
 
@@ -145,8 +179,10 @@ def dispatch_run(
     bench_command: Optional[str] = None,
     model: Optional[str] = None,
     base_branch: Optional[str] = None,
+    protect_paths: Optional[Sequence[str]] = None,
 ) -> RunState:
     base_branch = validate_base_branch(base_branch)
+    protect_paths = validate_protect_paths(protect_paths)
     if not prompt.strip():
         raise DispatchError("Prompt is empty.")
     if len(prompt.strip()) > MAX_PROMPT_CHARS:
@@ -163,6 +199,10 @@ def dispatch_run(
             raise DispatchError(
                 f"Can't start from base branch {base_branch!r} on every worker:\n  " + "\n  ".join(problems)
             )
+    if protect_paths:
+        problems = workers_missing_feature(workers, "protect", "a version with the protect feature")
+        if problems:
+            raise DispatchError("Can't protect paths on every worker:\n  " + "\n  ".join(problems))
 
     run_id = new_run_id()
     run = RunState(
@@ -170,6 +210,7 @@ def dispatch_run(
         prompt=prompt.strip(),
         repo_url=repo_url,
         base_branch=base_branch,
+        protect_paths=protect_paths,
         test_command=test_command,
         bench_command=bench_command,
         model=model,
@@ -193,6 +234,7 @@ def dispatch_run(
             bench_command=bench_command,
             model=model,
             base_branch=base_branch,
+            protect_paths=protect_paths,
         )
 
     results: list[Optional[WorkerRunState]] = [None] * count

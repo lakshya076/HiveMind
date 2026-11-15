@@ -74,6 +74,35 @@ def test_dispatch_then_status(fleet_key, fake_http):
     assert "log_tail" not in status["workers"][0]  # logs come from hive_logs
 
 
+def test_dispatch_passes_protect_and_status_reports_reverted(fleet_key, fake_http):
+    ClusterConfig(repo_url="https://x/repo.git", workers=[ARI]).save()
+
+    def handler(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={**HEALTH, "features": ["protect"]})
+        return httpx.Response(200, json={"status": "starting"})
+
+    fake_http.handler = handler
+    is_error, run = call("hive_dispatch", {"prompt": "fix it", "protect": ["tests/"], "test": "pytest -q"})
+    assert not is_error, run
+    assert run["protect_paths"] == ["tests"]
+    sent = [json.loads(r.content) for r in fake_http.requests if r.url.path == "/dispatch"]
+    assert sent[0]["protect_paths"] == ["tests"]
+
+    fake_http.handler = lambda request: httpx.Response(
+        200, json={"status": "succeeded", "protected_reverted": ["tests/test_a.py"]})
+    is_error, status = call("hive_status", {"run_id": run["run_id"]})
+    assert not is_error and status["workers"][0]["protected_reverted"] == ["tests/test_a.py"]
+
+
+def test_dispatch_protect_refused_on_worker_without_feature(fleet_key, fake_http):
+    ClusterConfig(repo_url="https://x/repo.git", workers=[ARI]).save()
+    fake_http.handler = lambda request: httpx.Response(200, json={**HEALTH, "features": ["base_branch"]})
+    is_error, text = call("hive_dispatch", {"prompt": "fix it", "protect": ["tests"]})
+    assert is_error and "protect" in text
+    assert not any(r.url.path == "/dispatch" for r in fake_http.requests)
+
+
 def test_merge_previews_then_merges_only_with_confirm(fleet_key, fake_http, origin_repo, tmp_path, git):
     origin, local = origin_repo
     branch = f"exp/{RUN_ID}/ari-simd"

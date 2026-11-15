@@ -40,12 +40,14 @@ def start_worker_job(
     bench_command: Optional[str],
     model: Optional[str],
     base_branch: Optional[str] = None,
+    protect_paths: Optional[list[str]] = None,
 ) -> WorkerRunState:
     """Dispatch task to hivemind-worker HTTP daemon. Returns immediately.
 
     ``remote_run_id`` is the run ID used on the worker (default: ``run_id``).
     ``base_branch`` must only be sent to workers that advertise the base_branch
     feature (see dispatch.workers_missing_feature); older workers ignore it.
+    The same goes for ``protect_paths`` and the protect feature.
     """
     remote_run_id = validate_run_id(remote_run_id or run_id)
     branch = branch_name(worker.id, strategy, run_id=run_id)
@@ -77,6 +79,8 @@ def start_worker_job(
     }
     if base_branch:
         payload["base_branch"] = base_branch
+    if protect_paths:
+        payload["protect_paths"] = protect_paths
 
     try:
         headers = _get_auth_headers()

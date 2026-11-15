@@ -155,6 +155,8 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
         details = worker.error or worker.log_tail or ""
         if len(details) > 120:
             details = details[-120:]
+        if worker.protected_reverted:
+            details = f"reverted protected: {', '.join(worker.protected_reverted)[:200]}. {details}"
         # Strip non-ASCII characters (e.g. aider token count symbols) to avoid
         # UnicodeEncodeError on Windows cp1252 consoles
         details = details.encode("ascii", errors="ignore").decode("ascii")
@@ -657,6 +659,13 @@ def check_cmd(cluster: Optional[str]):
     default=None,
     help="Branch on origin to start from (default: origin's default branch). Needs hivemind-worker 0.3.0+.",
 )
+@click.option(
+    "--protect",
+    "protect_paths",
+    multiple=True,
+    help="File or directory (relative to the repo root, e.g. tests/) the agent must not change; "
+    "the worker restores it before tests run (repeatable). Needs a worker with the protect feature.",
+)
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
 def dispatch_cmd(
     prompt: str,
@@ -668,6 +677,7 @@ def dispatch_cmd(
     model: Optional[str],
     engine: Optional[str],
     base_branch: Optional[str],
+    protect_paths: tuple[str, ...],
     cluster: Optional[str],
 ):
     """Start a parallel coding job on worker machines."""
@@ -690,7 +700,8 @@ def dispatch_cmd(
         f"[white]{escape(prompt)}[/white]\n"
         f"[dim]Origin:[/dim] {escape(resolved_repo)}\n"
         f"[dim]Base:[/dim] {escape(base_branch or 'default branch')}\n"
-        f"[dim]Strategies ({len(slot_workers)}):[/dim] "
+        + (f"[dim]Protect:[/dim] {escape(', '.join(protect_paths))}\n" if protect_paths else "")
+        + f"[dim]Strategies ({len(slot_workers)}):[/dim] "
         f"{escape(', '.join(f'{s} on {w.id}' for w, s in zip(slot_workers, assigned_strategies)))}",
         border_style="cyan",
     ))
@@ -712,6 +723,7 @@ def dispatch_cmd(
                 bench_command=bench_command,
                 model=model,
                 base_branch=base_branch,
+                protect_paths=protect_paths,
             )
         except DispatchError as exc:
             _fail(escape(str(exc)))

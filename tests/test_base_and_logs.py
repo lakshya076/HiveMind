@@ -6,7 +6,7 @@ from click.testing import CliRunner
 
 from hivemind.cli import cli
 from hivemind.config.cluster import ClusterConfig, WorkerNode
-from hivemind.runner.dispatch import DispatchError, dispatch_run, validate_base_branch
+from hivemind.runner.dispatch import DispatchError, dispatch_run, validate_base_branch, validate_protect_paths
 from hivemind.runner.state import RunState, WorkerRunState
 from hivemind.runner.status import refresh_run
 
@@ -233,3 +233,100 @@ def test_logs_full_handles_malformed_worker_json_gracefully(fleet_key, fake_http
     assert result.exit_code == 1
     assert "malformed log payload" in result.output
     assert "fallback tail" in result.output
+
+
+# ---------------------------------------------------------------- --protect
+
+
+@pytest.mark.parametrize(
+    "paths, cleaned",
+    [
+        (["tests/"], ["tests"]),
+        (["tasks/add/check.py", "tests", "tests/"], ["tasks/add/check.py", "tests"]),
+        (["tests\\unit\\check.py"], ["tests/unit/check.py"]),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_valid_protect_paths(paths, cleaned):
+    assert validate_protect_paths(paths) == cleaned
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["../x", "a/../b", "/abs", "C:\\x", "C:x", "-x", "--force", ":(glob)*", ".", "./tests", ".git",
+     "a/.git/hooks", "a\nb", "", "x" * 513, "\\\\server\\share"],
+)
+def test_invalid_protect_paths(path):
+    with pytest.raises(DispatchError):
+        validate_protect_paths([path])
+
+
+def test_too_many_protect_paths():
+    with pytest.raises(DispatchError, match="At most 32"):
+        validate_protect_paths([f"t{i}" for i in range(33)])
+
+
+def test_protect_is_sent_and_saved(fleet_key, fake_http):
+    fake_http.handler = fleet({ARI.host: health(["protect"]), HERMES.host: health(["base_branch", "protect"])})
+
+    run = dispatch_run(CLUSTER, "p", repo_url="r", workers=[ARI, HERMES], strategies=["a", "b"],
+                       protect_paths=["tests/", "tasks/add/check.py"])
+
+    assert [b["protect_paths"] for b in posts(fake_http)] == [["tests", "tasks/add/check.py"]] * 2
+    assert RunState.load(run.run_id).protect_paths == ["tests", "tasks/add/check.py"]
+
+
+def test_protect_refused_if_any_worker_would_ignore_it(fleet_key, fake_http):
+    # An older worker drops unknown fields and would let the agent edit the tests.
+    fake_http.handler = fleet({ARI.host: health(["protect"]), HERMES.host: health(["base_branch", "logs"])})
+
+    with pytest.raises(DispatchError, match="hermes: hivemind-worker 0.3.0 does not support it"):
+        dispatch_run(CLUSTER, "p", repo_url="r", workers=[ARI, HERMES], strategies=["a", "b"], protect_paths=["tests"])
+    assert posts(fake_http) == []
+
+
+def test_invalid_protect_path_contacts_no_worker(fleet_key, fake_http):
+    with pytest.raises(DispatchError, match="Invalid protect path"):
+        dispatch_run(CLUSTER, "p", repo_url="r", workers=[ARI], strategies=["a"], protect_paths=["../x"])
+    assert fake_http.requests == []
+
+
+def test_without_protect_no_field(fleet_key, fake_http):
+    fake_http.handler = fleet({})
+    dispatch_run(CLUSTER, "p", repo_url="r", workers=[ARI], strategies=["a"])
+    assert "protect_paths" not in posts(fake_http)[0]
+
+
+def test_cli_protect_flag(fleet_key, fake_http):
+    ClusterConfig(repo_url="r", workers=[ARI]).save()
+    fake_http.handler = fleet({ARI.host: health(["protect"])})
+
+    result = CliRunner().invoke(cli, ["dispatch", "fix it", "--protect", "tests/", "--protect", "tasks/add/check.py"])
+
+    assert result.exit_code == 0, result.output
+    assert "Protect: tests/, tasks/add/check.py" in result.output
+    assert posts(fake_http)[0]["protect_paths"] == ["tests", "tasks/add/check.py"]
+
+
+def test_cli_protect_refusal_exits_1(fleet_key, fake_http):
+    ClusterConfig(repo_url="r", workers=[ARI]).save()
+    fake_http.handler = fleet({ARI.host: health(["base_branch", "logs"])})
+    result = CliRunner().invoke(cli, ["dispatch", "fix it", "--protect", "tests"])
+    assert result.exit_code == 1
+    assert "a version with the protect feature" in result.output
+    assert posts(fake_http) == []
+
+
+def test_status_shows_reverted_protected_files(fleet_key, fake_http):
+    RunState(run_id=RUN_ID, prompt="p", repo_url="r", protect_paths=["tasks"], workers=[WorkerRunState(
+        worker_id="ari", host=ARI.host, port=ARI.port, agent_engine="aider", strategy="s",
+        branch=f"exp/{RUN_ID}/ari-s", remote_run_dir=f"{RUN_ID}-1")]).save()
+    fake_http.handler = lambda request: httpx.Response(200, json={
+        "status": "succeeded", "protected_reverted": ["tasks/new_file/check.py"], "test_exit_code": 0})
+
+    result = CliRunner().invoke(cli, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "reverted protected: tasks/new_file/check.py" in result.output
+    assert RunState.load(RUN_ID).workers[0].protected_reverted == ["tasks/new_file/check.py"]

@@ -84,6 +84,7 @@ class WorkerRunState(BaseModel):
     test_exit_code: Optional[int] = None
     agent_exit_code: Optional[int] = None
     bench_exit_code: Optional[int] = None
+    protected_reverted: Optional[List[str]] = None  # protected files the agent changed; the worker restored them
     benchmark_data: Optional[Any] = None
     log_tail: Optional[str] = None
 
@@ -98,6 +99,7 @@ class RunState(BaseModel):
     prompt: str
     repo_url: str
     base_branch: Optional[str] = None  # requested with --base; None means origin's default branch
+    protect_paths: Optional[List[str]] = None  # requested with --protect
     test_command: Optional[str] = None
     bench_command: Optional[str] = None
     model: Optional[str] = None
