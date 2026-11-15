@@ -121,7 +121,7 @@ def local_git(
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         result = subprocess.run(
-            ["git", "-c", "protocol.ext.allow=never", *args],
+            ["git", "-c", "protocol.ext.allow=never", "-c", "core.fsmonitor=false", *args],
             capture_output=True,
             text=True,
             encoding="utf-8",

@@ -152,6 +152,29 @@ def test_add_workers_rejects_bad_hosts(fleet_key, ip):
     assert human.asked is None  # rejected before the human is asked
 
 
+@pytest.mark.parametrize("port", [0, -1, 65536])
+def test_add_workers_and_discover_reject_bad_ports(fleet_key, port):
+    human = answer({"add_0": True})
+    is_error, _ = call("hive_add_workers", {"ips": ["10.0.0.8"], "port": port}, elicit=human)
+    assert is_error
+    assert human.asked is None
+    is_error, _ = call("hive_discover", {"port": port})
+    assert is_error
+
+
+def test_add_workers_deduplicates_ips(fleet_key, fake_http):
+    ClusterConfig(workers=[ARI]).save()
+    fake_http.handler = lambda request: httpx.Response(200, json=HEALTH)
+    human = answer({"add_0": True})
+
+    is_error, result = call("hive_add_workers", {"ips": ["10.0.0.8", "10.0.0.8"]}, elicit=human)
+
+    assert not is_error, result
+    assert list(human.asked.requested_schema["properties"]) == ["add_0"]
+    assert len(fake_http.requests) == 1
+    assert [w["host"] for w in result["added"]] == ["10.0.0.8"]
+
+
 def test_discover_is_read_only(fleet_key, fake_http, monkeypatch):
     from hivemind.discovery.scanner import DiscoveredDevice
     from hivemind.discovery.tailscale import TailscaleScanner
