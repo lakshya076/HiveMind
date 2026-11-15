@@ -81,6 +81,10 @@ class SystemProber:
                 if ram_gb:
                     tags.append(f"{ram_gb}gb-ram")
 
+                disk_free_gb = data.get("disk_free_gb")
+                if isinstance(disk_free_gb, (int, float)) and not isinstance(disk_free_gb, bool):
+                    tags.append(f"{disk_free_gb:g}gb-free")
+
                 for engine in data.get("engines", []):
                     tags.append(f"engine:{engine}")
 

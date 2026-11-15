@@ -117,6 +117,14 @@ def refresh_run(
                     worker_state.protected_reverted = cleaned_reverted
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
+            for ts_field in ("started_at", "finished_at"):
+                ts_val = payload.get(ts_field)
+                if isinstance(ts_val, str) and ts_val.strip():
+                    setattr(worker_state, ts_field, ts_val.strip()[:64])
+            for stat_field in ("files_changed", "insertions", "deletions"):
+                stat_val = payload.get(stat_field)
+                if isinstance(stat_val, int) and not isinstance(stat_val, bool) and stat_val >= 0:
+                    setattr(worker_state, stat_field, stat_val)
         elif worker_state.status not in TERMINAL_STATUSES:
             # Only unfinished runs change: a finished result is never overwritten by a
             # worker that is offline or has since lost the run.

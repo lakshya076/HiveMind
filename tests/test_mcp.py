@@ -59,6 +59,26 @@ def test_tools_need_a_fleet_key():
     assert is_error and "hive keygen" in text
 
 
+def test_hive_check_requires_git_and_engine_for_all_ready(fleet_key, fake_http):
+    ClusterConfig(workers=[ARI]).save()
+    fake_http.handler = lambda request: httpx.Response(
+        200, json={"status": "ready", "git_ready": True, "engines": ["claude-code"], "disk_free_gb": 120.5}
+    )
+    is_error, res = call("hive_check")
+    assert not is_error
+    assert res["all_ready"] is False
+    assert res["workers"][0]["engine_installed"] is False
+    assert res["workers"][0]["disk_free_gb"] == 120.5
+
+    fake_http.handler = lambda request: httpx.Response(
+        200, json={"status": "ready", "git_ready": True, "engines": ["aider"], "disk_free_gb": 120.5}
+    )
+    is_error, res = call("hive_check")
+    assert not is_error
+    assert res["all_ready"] is True
+
+
+
 def test_dispatch_then_status(fleet_key, fake_http):
     ClusterConfig(repo_url="https://x/repo.git", workers=[ARI]).save()
     fake_http.handler = lambda request: httpx.Response(200, json={"status": "starting"})

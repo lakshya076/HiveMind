@@ -209,3 +209,39 @@ Layer 1 ─ GIT ORIGIN  (GitHub / GitLab / self-hosted)
 4. **Phase 3** → Knowledge Bus + hybrid synthesizer maximizes output quality
 5. **Phase 4** → Production polish, TUI dashboard, container sandboxing
 6. **Phase 5** → MCP server, autonomous master agent, slash command integration
+
+---
+
+## Backlog: Smaller Improvements (reviewed 2026-11-16)
+
+Gaps found by reading `hivemind` and `hivemind-worker`. Each item says whether it needs only the master or also a worker change. A worker change alters the master-worker HTTP contract, so it needs a matching PR in the other repo.
+
+### Bugs
+
+- [x] **`hive_check` reports `all_ready` too early** (`src/hivemind/mcp/server.py`, `hive_check`): `all_ready` only tests `online`. It ignores `git_ready` and `engine_installed`, so an agent sees `all_ready: true` for a worker that cannot run its engine. *Master only.*
+
+### Master only
+
+- [x] **Show run duration**: the worker already returns `started_at` and `finished_at` in `GET /status`, but `runner/status.py` never reads them and `WorkerRunState` has no fields for them. Store them and add an elapsed column to `hive status`. First step towards Phase 2 "Budget & Token Telemetry".
+- [x] **Engine preflight at dispatch**: `--base` checks each worker's `/health` before dispatching; `--engine` does not. `hive dispatch --engine aider` on a worker without aider fails only after the clone. `/health` already lists `engines`; reuse the `workers_missing_feature` pattern.
+- [x] **Rank the winner by benchmark**: `default_winner` (`runner/merge.py`) takes the first `succeeded` strategy. Add `hive merge --rank-by <json-key>` (min or max) so the default pick is the best `benchmark_data` score.
+- [x] **`--json` output** for `hive status`, `runs`, `list` and `check`. The README calls the CLI scriptable, but output is Rich tables only. `_run_summary` in the MCP server already builds the dict form.
+- [x] **`hive diff [worker:strategy]`**: the commit and diff preview exists only inside `hive merge`. Expose it as its own command and MCP tool, reusing `prepare_merge`.
+- [x] **`hive clean`**: nothing deletes `exp/<run_id>/*` branches on origin or prunes `~/.hivemind/runs/`, so losing branches pile up. Deleting remote branches is destructive: list them and ask for confirmation first.
+- [x] **Route by capability tags**: `capabilities` is collected by `hive discover` and shown by `hive list`, but never used. Add `hive dispatch --require <tag>` to filter workers. Cheap first half of the Phase 2 Hardware-Aware Task Matcher.
+- [x] **Per-strategy engine and model**: `--engine` and `--model` apply to every slot (`cli.py`, `dispatch_cmd`), yet `DispatchRequest` already accepts both per request. Add syntax such as `--strategy simd@aider` so engines can compete on the same task.
+- [x] **Prompt from a file or stdin**: `hive dispatch --prompt-file <path>` (or `-` for stdin). Long prompts are hard to quote in a Windows shell. Keep the `MAX_PROMPT_CHARS` check.
+- [x] **`hive retry`**: re-dispatch only the `failed` and `unknown` slots of a run with the same prompt, tests and base. Every input is already saved in `RunState`.
+- [x] **Notify when a run finishes**: `hive status --watch --notify` (terminal bell) or `--on-done <cmd>`.
+- [x] **`hive merge --pr`**: open a pull request from the winning `exp/*` branch with `gh pr create` instead of merging locally. Fits repositories with a protected `main`.
+- [x] **Recover lost runs**: the worker has `GET /runs`, but the master never calls it. Add `hive runs --remote` to list runs a worker knows about but the master has lost (deleted `~/.hivemind/runs/`, or dispatched from another machine).
+- [x] **MCP parity**: `hive_logs` with `full` reads at most 256 KiB, while `hive logs --full` reads 1 MiB. Decide if that difference is intended. Add MCP tools for `diff` and `clean` once they exist.
+
+### Needs a `hivemind-worker` change (separate PR)
+
+- [x] **Per-strategy prompt hint**: the worker prompt only says `You are pursuing strategy N of M: <name>. Take a distinct approach.` (`runner.py`). Allow `--strategy "simd=use AVX2 intrinsics"` and send the hint as a new dispatch field, so the name is not the only thing that makes strategies differ. Gate it on a `/health` feature flag, as `base_branch` is.
+- [x] **Per-dispatch timeout**: `agent_timeout` (default 1800 s) is fixed per worker in `worker.json`. Add a dispatch field that can only shorten it, never raise it above the worker's own limit. Stops runaway token cost before the Phase 2 watchdog exists.
+- [x] **Diff size in status**: have the worker report files changed and lines added or removed, so `hive status` shows the size of each solution without fetching branches.
+- [x] **Disk usage in health**: the worker keeps up to `max_retained_workspaces` (default 20) working trees, but `/health` reports no disk usage. Report free disk space and show it in `hive check`.
+- [x] **Let `claude-code` run commands (opt-in)**: the worker starts `claude -p --permission-mode acceptEdits`, so the agent cannot run the tests itself while working. Add a per-worker setting in `worker.json` for allowed tools. This is a security trade-off: keep it worker-side only and off by default, never a dispatch field.
+

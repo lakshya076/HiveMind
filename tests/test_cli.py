@@ -222,3 +222,60 @@ def test_version_matches_the_package():
 
     assert version("hivemind") == __version__
     assert __version__ in CliRunner().invoke(cli, ["--version"]).output
+
+
+def test_json_flags_and_elapsed_diff_in_status(runner, fleet_key, fake_http, tmp_path):
+    import json
+
+    ClusterConfig(
+        cluster_name="lab",
+        repo_url="git@github.com:me/repo.git",
+        workers=[WorkerNode(id="ari", host="10.0.0.2", agent_engine="aider", capabilities=["high-cpu"])],
+    ).save()
+
+    res_list = runner.invoke(cli, ["list", "--json"])
+    assert res_list.exit_code == 0, res_list.output
+    assert json.loads(res_list.output)["workers"][0]["id"] == "ari"
+
+    fake_http.handler = lambda request: httpx.Response(
+        200,
+        json={"status": "ready", "git_ready": True, "engines": ["aider"], "disk_free_gb": 85.2, "version": "0.3.0"},
+    )
+    res_check = runner.invoke(cli, ["check", "--json"])
+    assert res_check.exit_code == 0, res_check.output
+    check_payload = json.loads(res_check.output)
+    assert check_payload["all_ready"] is True
+    assert check_payload["workers"][0]["disk_free_gb"] == 85.2
+
+    branch = f"exp/{RUN_ID}/ari-strategy-1"
+    save_run("git@github.com:me/repo.git", branch)
+    fake_http.handler = lambda request: httpx.Response(
+        200,
+        json={
+            "status": "succeeded",
+            "branch": branch,
+            "pushed": True,
+            "started_at": "2026-11-16T00:00:00Z",
+            "finished_at": "2026-11-16T00:01:15Z",
+            "files_changed": 2,
+            "insertions": 14,
+            "deletions": 3,
+        },
+    )
+    res_status = runner.invoke(cli, ["status"])
+    assert res_status.exit_code == 0, res_status.output
+    assert "1m 15s" in res_status.output
+    assert "+14/-3 (2f)" in res_status.output
+
+    marker = tmp_path / "done.txt"
+    res_status_json = runner.invoke(
+        cli,
+        ["status", "--json", "--notify", "--on-done", f'python -c "import os, pathlib; pathlib.Path(r\'{marker}\').write_text(os.environ[\'HIVEMIND_RUN_ID\'])"'],
+    )
+    assert res_status_json.exit_code == 0, res_status_json.output
+    assert marker.read_text(encoding="utf-8") == RUN_ID
+
+    res_runs = runner.invoke(cli, ["runs", "--json"])
+    assert res_runs.exit_code == 0, res_runs.output
+    assert json.loads(res_runs.output)["runs"][0]["run_id"] == RUN_ID
+
