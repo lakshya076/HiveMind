@@ -4,13 +4,19 @@ import subprocess
 from typing import Optional
 
 from hivemind.config.cluster import SUPPORTED_ENGINES, WorkerNode
-from hivemind.runner.dispatch import DispatchError, validate_base_branch, validate_branch_ref
+from hivemind.runner.dispatch import (
+     MAX_PROTECT_PATH_CHARS,
+    DispatchError,
+    validate_base_branch,
+    validate_branch_ref,
+)
 from hivemind.runner.remote import read_worker_result
 from hivemind.runner.state import RunState, WorkerRunState
 
 TERMINAL_STATUSES = {"succeeded", "failed", "no_changes", "cancelled"}
 MAX_LOG_TAIL_CHARS = 65536
 MAX_ERROR_CHARS = 8192
+MAX_PROTECTED_REVERTED = 256
 
 
 def worker_node_for(worker_state: WorkerRunState, workers_by_id: dict[str, WorkerNode]) -> WorkerNode:
@@ -102,7 +108,11 @@ def refresh_run(
                     pass
             reverted = payload.get("protected_reverted")
             if isinstance(reverted, list):
-                worker_state.protected_reverted = [str(name) for name in reverted]
+                worker_state.protected_reverted = [
+                    "".join(ch for ch in name if ord(ch) >= 0x20 and ord(ch) != 0x7F)[:MAX_PROTECT_PATH_CHARS]
+                    for name in reverted[:MAX_PROTECTED_REVERTED]
+                    if isinstance(name, str) and name.strip()
+                ]
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
         elif worker_state.status not in TERMINAL_STATUSES:
