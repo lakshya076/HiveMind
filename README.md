@@ -285,6 +285,7 @@ hive dispatch "Optimize sorting algorithm" \
 | `--model <id>` | Model override for the worker engine |
 | `--engine <name>` | Engine for every strategy (`claude-code`, `claude`, `agy`, `aider`), overriding `agent_engine` from `cluster.json` for this run only |
 | `--base <branch>` | Start every strategy from this branch on origin (e.g. `develop`, `feature/login`) instead of the default branch. `hive merge` then merges into that branch. Needs hivemind-worker 0.3.0 or later on every selected worker; see below |
+| `--protect <path>` | File or directory relative to the repo root (e.g. `tests/`, `tasks/add/check.py`) the agent must not change (repeatable). The worker restores it to the base before the tests run and before committing, so the test command always runs the original tests. Needs a hivemind-worker version with the `protect` feature on every selected worker; see below |
 
 **How strategies map to workers.** Each strategy is one slot. Strategy *n* goes to worker *n*, wrapping round when there are more strategies than workers. Slots without a name get `strategy-<n>`. A worker that gets several slots queues those beyond its `max_concurrent_runs` (default 2). Examples:
 
@@ -295,6 +296,8 @@ hive dispatch "Optimize sorting algorithm" \
 Each slot uses its own run ID on the worker (`<run_id>-<n>`), while the branch keeps the shared `<run_id>`.
 
 **Starting from another branch (`--base`).** Workers ignore dispatch fields they don't know. An older worker given `--base` would therefore quietly start from the default branch and report success. Before dispatching, `hive` checks every selected worker's `/health` for the `base_branch` feature. If any worker is older or can't be reached, it refuses with the reason and dispatches nothing. A base branch that doesn't exist on origin fails the run on the worker before the agent starts.
+
+**Protecting the tests (`--protect`).** An agent can otherwise make a run pass by editing the very tests it is judged by (for example emptying `check.py`). With `--protect tests/`, the worker puts every protected path back exactly as it is on the base after the agent exits: edited or deleted files are restored and files the agent added there are removed. Only then are the agent's changes committed and the tests run, so the pushed branch never touches protected paths. If the agent changed only protected files, the run ends `no_changes`. `hive status` shows which files were reverted in Details (`reverted protected: tests/check.py`), and `hive_status` reports them as `protected_reverted`. Paths must be relative to the repository root, without `..`, `.git`, a leading `-` or `/`, or a drive letter; at most 32. As with `--base`, `hive` first checks every selected worker's `/health` for the `protect` feature and refuses to dispatch if any worker lacks it, because an older worker would silently ignore the field.
 
 The worker's `agent_engine` in `cluster.json` must be one the worker can launch: `claude-code` (alias `claude`), `agy` or `aider`. Anything else is rejected when the cluster is loaded.
 
@@ -419,7 +422,7 @@ Other clients take the same entry in their MCP config file (`.cursor/mcp.json`, 
 | Tool | What it does |
 |---|---|
 | `hive_list`, `hive_check`, `hive_runs` | The cluster file, live worker health, saved runs |
-| `hive_dispatch` | Start a run (prompt, strategies, workers, test, bench, model, engine, base); returns the run with its `run_id` |
+| `hive_dispatch` | Start a run (prompt, strategies, workers, test, bench, model, engine, base, protect); returns the run with its `run_id` |
 | `hive_status` | Poll the workers once; `finished` is true when every strategy has ended |
 | `hive_logs` | Last lines per strategy, or with `full` the end of the agent, test, bench or wrapper log |
 | `hive_cancel` | Cancel strategies that are still queued or running |
@@ -575,6 +578,7 @@ nssm start HiveMindWorker
 | **Workspace Confinement** | Each run gets its own directory (`~/hive-workspace/<run_id>`) that the run ID cannot escape. This is not a sandbox; see the warning below. |
 | **Stripped Subprocess Environment** | Worker subprocesses run with only essential system variables. AI provider keys are put in the agent's environment only, not in test, benchmark or git commands. This keeps them out of environment dumps; it is not isolation. |
 | **Agent Cannot Hijack Git** | Every run starts from a fresh clone. After the agent exits, the worker removes any git hooks it planted and restores `.git/config`; every worker git command runs with hooks disabled and the `ext::` protocol blocked. Since hivemind-worker 1.0.1 the agent's changes are committed before the tests run, and only that commit is pushed: files or commits the test command creates never reach origin. |
+| **Protected Tests** | With `--protect <path>`, the worker restores protected files and directories to the base after the agent exits and before it commits and runs the tests, so an agent cannot pass by editing or deleting its own tests. Reverted files are reported in `hive status`. |
 | **Bounded Agent Access (`hive mcp`)** | An agent using the MCP tools can dispatch, cancel and merge into a local clone, but never push, create or read the fleet key, or add a worker without your approval through an elicitation form it cannot fill in itself. Worker machines never get these tools. |
 | **Tailscale Mesh Encryption** | When communicating over Tailscale (`100.x.x.x`), all peer-to-peer traffic is end-to-end encrypted with WireGuard. |
 
