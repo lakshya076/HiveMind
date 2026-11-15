@@ -504,6 +504,49 @@ To ensure worker nodes are always online and auto-start on system boot:
    journalctl -u hivemind-worker -f
    ```
 
+#### Without sudo: systemd user service
+
+If you can't use `sudo`, run the worker as a **user** service instead. It runs as you and needs no root.
+
+1. Save the fleet key: `hivemind-worker key set`.
+
+2. Create `~/.config/systemd/user/hivemind-worker.service` (`%h` is your home directory; change the path if `which hivemind-worker` differs):
+   ```ini
+   [Unit]
+   Description=HiveMind Worker Daemon
+
+   [Service]
+   Type=simple
+   Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+   ExecStart=%h/.local/bin/hivemind-worker start
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+3. Enable and start:
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user enable --now hivemind-worker
+   journalctl --user -u hivemind-worker -f      # logs
+   ```
+
+4. Keep it running after you log out, and start it at boot:
+   ```bash
+   loginctl enable-linger "$USER"
+   loginctl show-user "$USER" -p Linger          # Linger=yes
+   ```
+   Without lingering, a user service stops when your last session ends and does not start at boot. Most distributions (Debian included) let you enable it for yourself; on some, only an admin can.
+
+   If lingering is refused, use a `@reboot` line in `crontab -e` instead: `@reboot $HOME/.local/bin/hivemind-worker start >> $HOME/.hivemind/worker.log 2>&1`. It starts at boot, but nothing restarts it after a crash.
+
+After `git pull`, restart with `systemctl --user restart hivemind-worker`.
+
+> [!WARNING]
+> **Run either the system service or the user service, never both.** They belong to separate systemd managers, so neither overrides the other: both start, the second fails to bind port `7422` (`address already in use`) and, with `Restart=always`, keeps crashing every 5 seconds. Disable the one you don't use: `sudo systemctl disable --now hivemind-worker` or `systemctl --user disable --now hivemind-worker`. Check which one is running with `systemctl status hivemind-worker` and `systemctl --user status hivemind-worker`.
+
 ---
 
 ### Windows (Background / Task Scheduler / NSSM)

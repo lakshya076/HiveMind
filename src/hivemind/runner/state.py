@@ -85,6 +85,11 @@ class WorkerRunState(BaseModel):
     agent_exit_code: Optional[int] = None
     bench_exit_code: Optional[int] = None
     protected_reverted: Optional[List[str]] = None  # protected files the agent changed; the worker restored them
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    files_changed: Optional[int] = None
+    insertions: Optional[int] = None
+    deletions: Optional[int] = None
     benchmark_data: Optional[Any] = None
     log_tail: Optional[str] = None
 

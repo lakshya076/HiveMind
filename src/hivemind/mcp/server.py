@@ -137,9 +137,13 @@ def hive_check() -> dict[str, Any]:
             "engine": worker.agent_engine,
             "engine_installed": wanted in engines if health else None,
             "engines": engines,
+            "disk_free_gb": (health or {}).get("disk_free_gb"),
             "error": err,
         })
-    return {"workers": workers, "all_ready": all(w["online"] for w in workers)}
+    return {
+        "workers": workers,
+        "all_ready": all(w["online"] and bool(w["git_ready"]) and bool(w["engine_installed"]) for w in workers),
+    }
 
 
 @app.tool(annotations=READ_ONLY)

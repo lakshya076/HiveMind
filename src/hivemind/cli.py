@@ -1,12 +1,14 @@
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import secrets
+import subprocess
 import sys
 import time
 import click
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import NoReturn, Optional
+from typing import Any, NoReturn, Optional
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -127,11 +129,51 @@ def _pick_worker(run: RunState, choice: str, candidates: list[WorkerRunState]) -
     except MergeError as exc:
         _fail(escape(str(exc)))
 
+def _format_elapsed(worker: WorkerRunState) -> str:
+    if not worker.started_at:
+        return "[dim]-[/dim]"
+    try:
+        start_dt = datetime.fromisoformat(worker.started_at.replace("Z", "+00:00"))
+        if worker.finished_at:
+            end_dt = datetime.fromisoformat(worker.finished_at.replace("Z", "+00:00"))
+        elif worker.status not in TERMINAL_STATUSES:
+            end_dt = datetime.now(timezone.utc)
+        else:
+            return "[dim]-[/dim]"
+        secs = max(0, int((end_dt - start_dt).total_seconds()))
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m {secs % 60:02d}s"
+        return f"{secs // 3600}h {(secs % 3600) // 60:02d}m"
+    except Exception:
+        return "[dim]-[/dim]"
+
+
+def _format_diff(worker: WorkerRunState) -> str:
+    if worker.files_changed is None:
+        return "[dim]-[/dim]"
+    if worker.files_changed == 0:
+        return "[dim]0[/dim]"
+    ins = worker.insertions or 0
+    dels = worker.deletions or 0
+    return f"[green]+{ins}[/green]/[red]-{dels}[/red] ({worker.files_changed}f)"
+
+
+def _run_summary_dict(run: RunState) -> dict[str, Any]:
+    data = run.model_dump(exclude={"workers": {"__all__": {"log_tail"}}})
+    for item, worker in zip(data["workers"], run.workers):
+        item["label"] = worker_label(run, worker)
+    data["finished"] = all(w.status in TERMINAL_STATUSES for w in run.workers)
+    return data
+
+
 def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     show_bench = bool(run.bench_command) or any(
         w.benchmark_data is not None or w.bench_exit_code is not None
         for w in run.workers
     )
+    show_diff = any(w.files_changed is not None for w in run.workers)
     table = Table(
         title=title or f"Run {run.run_id}",
         border_style="cyan",
@@ -140,6 +182,9 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
     table.add_column("Strategy", style="magenta")
     table.add_column("Branch", style="green")
     table.add_column("Status", justify="center")
+    table.add_column("Elapsed", justify="right", style="dim")
+    if show_diff:
+        table.add_column("Diff", justify="right")
     table.add_column("Tests", justify="center")
     if show_bench:
         table.add_column("Benchmark", justify="center", style="cyan")
@@ -165,8 +210,11 @@ def _print_run_table(run: RunState, title: Optional[str] = None) -> None:
             escape(worker.strategy),
             escape(worker.branch or "-"),
             _status_style(worker.status),
-            tests,
+            _format_elapsed(worker),
         ]
+        if show_diff:
+            row.append(_format_diff(worker))
+        row.append(tests)
         if show_bench:
             row.append(_format_benchmark(worker))
         row.append(escape(details.replace("\n", " ")))
@@ -519,9 +567,17 @@ def discover_cmd(output: Optional[str], use_local: bool, use_tailscale: bool, da
 
 @cli.command(name="list")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file (default: ~/.hivemind/cluster.json).")
-def list_cmd(cluster: Optional[str]):
+@click.option("--json", "as_json", is_flag=True, default=False, help="Print cluster workers as JSON.")
+def list_cmd(cluster: Optional[str], as_json: bool):
     """List all configured worker nodes in the cluster."""
     config = _load_config(cluster)
+    if as_json:
+        click.echo(json.dumps({
+            "cluster_name": config.cluster_name,
+            "repo_url": config.repo_url,
+            "workers": [w.model_dump() for w in config.workers],
+        }, indent=2))
+        return
 
     table = Table(title=f"HiveMind Cluster: {escape(config.cluster_name)} ({len(config.workers)} Workers)", border_style="cyan")
     table.add_column("Worker ID", style="bold white")
@@ -549,16 +605,18 @@ def list_cmd(cluster: Optional[str]):
 
 @cli.command(name="check")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file (default: ~/.hivemind/cluster.json).")
-def check_cmd(cluster: Optional[str]):
+@click.option("--json", "as_json", is_flag=True, default=False, help="Print readiness report as JSON.")
+def check_cmd(cluster: Optional[str], as_json: bool):
     """Test HTTP Daemon connectivity, Git readiness, and AI CLI tools on all configured workers."""
     if not _require_fleet_key():
         sys.exit(1)
     config = _load_config(cluster)
 
-    console.print(Panel.fit(
-        f"[bold cyan]Checking HiveMind Cluster:[/bold cyan] {escape(config.cluster_name)} ({len(config.workers)} nodes)",
-        border_style="cyan"
-    ))
+    if not as_json:
+        console.print(Panel.fit(
+            f"[bold cyan]Checking HiveMind Cluster:[/bold cyan] {escape(config.cluster_name)} ({len(config.workers)} nodes)",
+            border_style="cyan"
+        ))
 
     table = Table(title="Cluster Readiness Status", border_style="green")
     table.add_column("Worker ID", style="bold white")
@@ -569,28 +627,22 @@ def check_cmd(cluster: Optional[str]):
     table.add_column("Live Hardware / Tools", style="cyan")
 
     probe_results: list[Optional[tuple]] = [None] * len(config.workers)
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console
-    ) as progress:
-        task = progress.add_task("Auditing worker nodes...", total=len(config.workers))
-        if config.workers:
-            with ThreadPoolExecutor(max_workers=min(32, max(1, len(config.workers)))) as pool:
-                futures = {
-                    pool.submit(SystemProber.probe_daemon, worker.host, worker.port, 3.5): idx
-                    for idx, worker in enumerate(config.workers)
-                }
-                for future in as_completed(futures):
-                    idx = futures[future]
-                    try:
-                        probe_results[idx] = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        probe_results[idx] = (None, [], str(exc))
-                    progress.advance(task)
+    if config.workers:
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(config.workers)))) as pool:
+            futures = {
+                pool.submit(SystemProber.probe_daemon, worker.host, worker.port, 3.5): idx
+                for idx, worker in enumerate(config.workers)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    probe_results[idx] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    probe_results[idx] = (None, [], str(exc))
 
     not_ready = 0
     versions: dict[str, list[str]] = {}
+    json_workers: list[dict[str, Any]] = []
     for idx, worker in enumerate(config.workers):
         h_data, tags, err = probe_results[idx] or (None, [], "refused")
         if not h_data:
@@ -599,13 +651,27 @@ def check_cmd(cluster: Optional[str]):
         if h_data:
             versions.setdefault(version, []).append(worker.id)
 
+        engines = (h_data or {}).get("engines", [])
+        wanted = "claude-code" if worker.agent_engine == "claude" else worker.agent_engine
+        json_workers.append({
+            "id": worker.id,
+            "online": h_data is not None,
+            "status": (h_data or {}).get("status"),
+            "version": (h_data or {}).get("version"),
+            "git_ready": (h_data or {}).get("git_ready"),
+            "engine": worker.agent_engine,
+            "engine_installed": wanted in engines if h_data else None,
+            "engines": engines,
+            "disk_free_gb": (h_data or {}).get("disk_free_gb"),
+            "error": err,
+        })
+
         if h_data:
             daemon_status = "[bold green]ONLINE (Ready)[/bold green]" if h_data.get("status") == "ready" else "[bold yellow]BUSY[/bold yellow]"
             git_status = "[bold green]YES[/bold green]" if h_data.get("git_ready") else "[bold red]NO (missing)[/bold red]"
 
-            engines = h_data.get("engines", [])
             # Workers report Claude Code as "claude-code"; "claude" is the cluster.json alias.
-            if ("claude-code" if worker.agent_engine == "claude" else worker.agent_engine) in engines:
+            if wanted in engines:
                 engine_status = f"[bold green]{escape(worker.agent_engine)}[/bold green]"
             elif engines:
                 engine_status = f"[yellow]{escape(worker.agent_engine)} (avail: {escape(', '.join(engines))})[/yellow]"
@@ -627,6 +693,15 @@ def check_cmd(cluster: Optional[str]):
             escape(version),
             live_caps_str
         )
+
+    if as_json:
+        click.echo(json.dumps({
+            "workers": json_workers,
+            "all_ready": all(w["online"] and bool(w["git_ready"]) and bool(w["engine_installed"]) for w in json_workers),
+        }, indent=2))
+        if not_ready:
+            sys.exit(1)
+        return
 
     console.print("\n", table, "\n")
     if len(versions) > 1:
@@ -745,36 +820,51 @@ def dispatch_cmd(
 @click.option("--run", "run_id", default=None, help="Run id (default: latest).")
 @click.option("--watch", "-w", is_flag=True, default=False, help="Keep polling until every strategy has finished.")
 @click.option("--interval", default=10.0, show_default=True, type=click.FloatRange(min=1.0), help="Seconds between polls with --watch.")
+@click.option("--notify", is_flag=True, default=False, help="Ring the terminal bell when a watched run finishes.")
+@click.option("--on-done", "on_done", default=None, help="Shell command to run when a watched run finishes (sets HIVEMIND_RUN_ID).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Print run status as JSON.")
 @click.option("--cluster", "-c", default=None, help="Path to cluster configuration file.")
-def status_cmd(run_id: Optional[str], watch: bool, interval: float, cluster: Optional[str]):
+def status_cmd(
+    run_id: Optional[str],
+    watch: bool,
+    interval: float,
+    notify: bool,
+    on_done: Optional[str],
+    as_json: bool,
+    cluster: Optional[str],
+):
     """Show live status of a dispatched run by reading result.json from workers."""
     run, workers_by_id = _run_context(run_id, cluster)
 
     first_poll = True
     while True:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task(f"Polling workers for run {run.run_id}...", total=len(run.workers))
-            run = refresh_run(run, workers_by_id, skip_terminal=not first_poll)
-            first_poll = False
-            progress.advance(task, advance=len(run.workers))
-
-        base = f"  base {escape(run.base_branch)}" if run.base_branch else ""
-        console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {escape(run.repo_url)}{base}[/dim]")
-        _print_run_table(run)
+        run = refresh_run(run, workers_by_id, skip_terminal=not first_poll)
+        first_poll = False
 
         all_done = all(w.status in TERMINAL_STATUSES for w in run.workers)
+        if not as_json:
+            base = f"  base {escape(run.base_branch)}" if run.base_branch else ""
+            console.print(f"[bold cyan]Run {run.run_id}[/bold cyan]  [dim]origin {escape(run.repo_url)}{base}[/dim]")
+            _print_run_table(run)
+
         if all_done or not watch:
             break
-        console.print(f"[dim]Polling again in {interval:g}s (Ctrl+C to stop)...[/dim]")
+        if not as_json:
+            console.print(f"[dim]Polling again in {interval:g}s (Ctrl+C to stop)...[/dim]")
         time.sleep(interval)
 
-    if all_done and run.workers:
+    if as_json:
+        click.echo(json.dumps(_run_summary_dict(run), indent=2))
+    elif all_done and run.workers:
         console.print("[dim]All workers finished. Review branches, then[/dim] [bold white]hive merge[/bold white].\n")
+
+    if all_done and run.workers and (watch or notify or on_done):
+        if notify:
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+        if on_done:
+            env = {**os.environ, "HIVEMIND_RUN_ID": run.run_id}
+            subprocess.run(on_done, shell=True, env=env)
 
 
 def _run_context(run_id: Optional[str], cluster: Optional[str]) -> tuple[RunState, dict[str, WorkerNode]]:
@@ -893,9 +983,25 @@ def cancel_cmd(run_id: Optional[str], worker_choice: Optional[str], cluster: Opt
 
 @cli.command(name="runs")
 @click.option("--limit", "-n", default=20, show_default=True, type=click.IntRange(min=1), help="How many runs to show.")
-def runs_cmd(limit: int):
+@click.option("--json", "as_json", is_flag=True, default=False, help="Print runs as JSON.")
+def runs_cmd(limit: int, as_json: bool):
     """List saved runs, newest first. Statuses are as of the last status/merge; workers are not contacted."""
     runs = RunState.load_all()
+    if as_json:
+        out = []
+        for run in runs[:limit]:
+            counts: dict[str, int] = {}
+            for w in run.workers:
+                counts[w.status] = counts.get(w.status, 0) + 1
+            out.append({
+                "run_id": run.run_id,
+                "created_at": run.created_at,
+                "prompt": run.prompt[:200],
+                "strategies": len(run.workers),
+                "statuses": counts,
+            })
+        click.echo(json.dumps({"runs": out}, indent=2))
+        return
     if not runs:
         console.print("[dim]No runs yet. Start one with[/dim] [bold white]hive dispatch[/bold white].")
         return
