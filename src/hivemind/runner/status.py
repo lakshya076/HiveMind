@@ -108,11 +108,13 @@ def refresh_run(
                     pass
             reverted = payload.get("protected_reverted")
             if isinstance(reverted, list):
-                worker_state.protected_reverted = [
+                cleaned_reverted = [
                     "".join(ch for ch in name if ord(ch) >= 0x20 and ord(ch) != 0x7F)[:MAX_PROTECT_PATH_CHARS]
                     for name in reverted[:MAX_PROTECTED_REVERTED]
                     if isinstance(name, str) and name.strip()
                 ]
+                if cleaned_reverted or worker_state.status not in TERMINAL_STATUSES or worker_state.protected_reverted is None:
+                    worker_state.protected_reverted = cleaned_reverted
             if "benchmark_data" in payload and payload.get("benchmark_data") is not None:
                 worker_state.benchmark_data = payload.get("benchmark_data")
         elif worker_state.status not in TERMINAL_STATUSES:

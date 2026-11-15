@@ -243,6 +243,7 @@ def test_logs_full_handles_malformed_worker_json_gracefully(fleet_key, fake_http
     [
         (["tests/"], ["tests"]),
         (["tasks/add/check.py", "tests", "tests/"], ["tasks/add/check.py", "tests"]),
+        (["tests/", "tests/unit/check.py", "Tests"], ["tests"]),
         (["tests\\unit\\check.py"], ["tests/unit/check.py"]),
         ([], None),
         (None, None),
