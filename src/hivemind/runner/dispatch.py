@@ -87,7 +87,17 @@ def validate_protect_paths(paths: Optional[Sequence[str]]) -> Optional[list[str]
                 "(no '..', '.', '.git', leading '-' or '/', drive letter or control characters)."
             )
         cleaned_paths.append(cleaned)
-    return list(dict.fromkeys(cleaned_paths))
+    deduped: list[str] = []
+    seen_lower: set[str] = set()
+    for p in cleaned_paths:
+        low = p.lower()
+        if low not in seen_lower:
+            seen_lower.add(low)
+            deduped.append(p)
+    return [
+        p for p in deduped
+        if not any(other != p and p.lower().startswith(other.lower() + "/") for other in deduped)
+    ]
 
 
 def workers_missing_feature(
