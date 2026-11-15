@@ -267,6 +267,27 @@ def test_too_many_protect_paths():
         validate_protect_paths([f"t{i}" for i in range(33)])
 
 
+def test_protect_paths_rejects_bare_string():
+    with pytest.raises(DispatchError, match="list of paths"):
+        validate_protect_paths("tests")
+
+
+def test_refresh_run_bounds_and_sanitizes_protected_reverted(fleet_key, fake_http):
+    run = RunState(run_id=RUN_ID, prompt="p", repo_url="r", workers=[WorkerRunState(
+        worker_id="ari", host=ARI.host, port=ARI.port, agent_engine="aider", strategy="s",
+        branch=f"exp/{RUN_ID}/ari-s", remote_run_dir=f"{RUN_ID}-1")])
+    huge_list = ["a\x00\nb.py", "x" * 1000, "", 123] + [f"f{i}.py" for i in range(300)]
+    fake_http.handler = lambda request: httpx.Response(200, json={
+        "status": "succeeded", "protected_reverted": huge_list, "test_exit_code": 0})
+
+    run = refresh_run(run, {"ari": ARI})
+    reverted = run.workers[0].protected_reverted
+
+    assert len(reverted) <= 256
+    assert reverted[0] == "ab.py"
+    assert len(reverted[1]) == 512
+
+
 def test_protect_is_sent_and_saved(fleet_key, fake_http):
     fake_http.handler = fleet({ARI.host: health(["protect"]), HERMES.host: health(["base_branch", "protect"])})
 

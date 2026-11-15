@@ -63,13 +63,17 @@ def validate_protect_paths(paths: Optional[Sequence[str]]) -> Optional[list[str]
     Same rules the worker enforces at /dispatch: backslashes count as separators, and
     absolute paths, drive letters, '..', '.', '.git' and option-like paths are refused.
     """
+    if isinstance(paths, (str, bytes)):
+        raise DispatchError("protect_paths must be a list of paths, not a single string.")
     if not paths:
         return None
     if len(paths) > MAX_PROTECT_PATHS:
         raise DispatchError(f"At most {MAX_PROTECT_PATHS} protect paths are allowed.")
     cleaned_paths = []
     for path in paths:
-        cleaned = (path or "").strip().replace("\\", "/").rstrip("/")
+        if not isinstance(path, str):
+            raise DispatchError(f"Invalid protect path {path!r}: must be a string.")
+        cleaned = path.strip().replace("\\", "/").rstrip("/")
         if (
             not cleaned
             or len(cleaned) > MAX_PROTECT_PATH_CHARS
