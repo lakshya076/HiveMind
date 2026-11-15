@@ -33,18 +33,22 @@ from hivemind.runner.dispatch import (
     assign_strategies,
     dispatch_run,
     resolve_repo_url,
+    retry_run,
     select_workers,
 )
 from hivemind.runner.merge import (
     MergeError,
     default_winner,
+    delete_remote_exp_branches,
+    list_remote_exp_branches,
     mergeable_workers,
     pick_worker,
     prepare_merge,
+    prune_local_runs,
     run_merge,
     worker_label,
 )
-from hivemind.runner.remote import LOG_FILES, cancel_worker_job, fetch_worker_log
+from hivemind.runner.remote import LOG_FILES, cancel_worker_job, fetch_worker_log, fetch_worker_runs
 from hivemind.runner.state import RunState
 from hivemind.runner.status import TERMINAL_STATUSES, refresh_run, worker_node_for
 
@@ -148,16 +152,44 @@ def hive_check() -> dict[str, Any]:
 
 
 @app.tool(annotations=READ_ONLY)
-def hive_runs(limit: int = 20) -> dict[str, Any]:
-    """Saved runs, newest first, with status counts as of the last poll. Does not contact workers."""
+def hive_runs(limit: int = 20, remote: bool = False) -> dict[str, Any]:
+    """Saved runs, newest first, with status counts as of the last poll. With `remote=true`, also queries
+    worker daemons (`GET /runs`) for runs missing locally."""
+    all_runs = RunState.load_all()
     out = []
-    for run in RunState.load_all()[: max(1, limit)]:
+    for run in all_runs[: max(1, limit)]:
         counts: dict[str, int] = {}
         for w in run.workers:
             counts[w.status] = counts.get(w.status, 0) + 1
         out.append({"run_id": run.run_id, "created_at": run.created_at, "prompt": run.prompt[:200],
                     "strategies": len(run.workers), "statuses": counts})
-    return {"runs": out}
+    result: dict[str, Any] = {"runs": out}
+    if remote:
+        _require_key()
+        config = _config()
+        known = {
+            (w.worker_id, w.remote_run_dir or r.run_id)
+            for r in all_runs
+            for w in r.workers
+        } | {(w.worker_id, r.run_id) for r in all_runs for w in r.workers}
+        fetched = _in_parallel(fetch_worker_runs, config.workers)
+        remote_runs = []
+        for worker, (w_runs, _err) in zip(config.workers, fetched):
+            for wr in w_runs or []:
+                rid = str(wr.get("run_id") or "")
+                if not rid:
+                    continue
+                remote_runs.append({
+                    "worker_id": worker.id,
+                    "run_id": rid,
+                    "status": wr.get("status", "unknown"),
+                    "strategy": wr.get("strategy", "-"),
+                    "branch": wr.get("branch", "-"),
+                    "started_at": wr.get("started_at"),
+                    "local_known": (worker.id, rid) in known,
+                })
+        result["remote_runs"] = remote_runs[: max(1, limit)]
+    return result
 
 
 @app.tool()
@@ -218,14 +250,14 @@ def hive_logs(
     file: Literal["agent", "test", "bench", "wrapper"] = "agent",
 ) -> dict[str, Any]:
     """Logs per strategy (all, or `worker` as id or id:strategy). By default the last lines each worker
-    reports; `full` fetches the end of `file` (up to 256 KiB)."""
+    reports; `full` fetches the end of `file` (up to 1 MiB)."""
     run, workers_by_id = _run_context(run_id)
     try:
         targets = [pick_worker(run, worker, run.workers)] if worker else run.workers
     except MergeError as exc:
         raise ToolError(str(exc)) from exc
     fetched = _in_parallel(
-        lambda w: fetch_worker_log(worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id, file, 256 * 1024),
+        lambda w: fetch_worker_log(worker_node_for(w, workers_by_id), w.remote_run_dir or run.run_id, file, 1024 * 1024),
         targets,
     ) if full else [None] * len(targets)
     out = []
@@ -262,12 +294,14 @@ def hive_merge(
     repo_path: str,
     run_id: Optional[str] = None,
     worker: Optional[str] = None,
+    rank_by: Optional[str] = None,
+    higher_is_better: bool = False,
     confirm: bool = False,
 ) -> dict[str, Any]:
     """Merge a winning strategy into the local clone at `repo_path` (whose origin must be the run's repo).
     Without `confirm` it only previews the commits and diff stat. With `confirm=true` it checks out the
     run's base branch and merges with --no-ff. Never pushes. `worker` (id or id:strategy) defaults to the
-    first succeeded strategy; a failed one is only merged when named explicitly."""
+    first succeeded strategy (or best `rank_by` benchmark key); a failed one is only merged when named explicitly."""
     path = Path(repo_path).expanduser()
     if not path.is_dir():
         raise ToolError(f"repo_path {repo_path!r} is not a directory")
@@ -279,7 +313,7 @@ def hive_merge(
         if worker:
             winner = pick_worker(run, worker, candidates)
         else:
-            winner = default_winner(candidates)
+            winner = default_winner(candidates, rank_by=rank_by, higher_is_better=higher_is_better)
             if winner.status != "succeeded":
                 raise MergeError("No strategy succeeded. Name a worker to merge one anyway.")
         plan = prepare_merge(run, winner, cwd=str(path))
@@ -291,6 +325,103 @@ def hive_merge(
     except MergeError as exc:
         raise ToolError(str(exc)) from exc
     return {**result, "merged": True, "next": f"Merged locally into {plan.base}. The human reviews and pushes."}
+
+
+@app.tool(annotations=READ_ONLY)
+def hive_diff(
+    repo_path: str,
+    run_id: Optional[str] = None,
+    worker: Optional[str] = None,
+) -> dict[str, Any]:
+    """Preview the commits, diffstat and unified diff of a strategy's exp/* branch against the base branch
+    in the local clone at `repo_path`."""
+    path = Path(repo_path).expanduser()
+    if not path.is_dir():
+        raise ToolError(f"repo_path {repo_path!r} is not a directory")
+    run, _ = _run_context(run_id)
+    candidates = mergeable_workers(run)
+    if not candidates:
+        raise ToolError("No worker branches are available to diff yet.")
+    try:
+        winner = pick_worker(run, worker, candidates) if worker else default_winner(candidates)
+        plan = prepare_merge(run, winner, cwd=str(path), allow_dirty=True, include_patch=True)
+    except MergeError as exc:
+        raise ToolError(str(exc)) from exc
+    return {
+        "worker": worker_label(run, winner),
+        "branch": winner.branch,
+        "compare_base": plan.compare_base,
+        "commits": plan.commits,
+        "diff_stat": plan.diff_stat,
+        "diff": plan.patch,
+    }
+
+
+@app.tool()
+def hive_clean(
+    run_id: Optional[str] = None,
+    repo: Optional[str] = None,
+    prune_runs: bool = False,
+    keep_runs: int = 20,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """List and delete `exp/*` branches on origin (or `exp/<run_id>/*`), and optionally prune local runs.
+    Without `confirm=true`, only previews what would be deleted."""
+    resolved_repo = repo
+    if not resolved_repo and run_id:
+        try:
+            resolved_repo = RunState.load(run_id).repo_url
+        except (FileNotFoundError, ValueError):
+            pass
+    if not resolved_repo:
+        try:
+            resolved_repo = ClusterConfig.load().repo_url
+        except (FileNotFoundError, ValueError, OSError):
+            pass
+    if not resolved_repo:
+        try:
+            resolved_repo = RunState.load_latest().repo_url
+        except (FileNotFoundError, ValueError):
+            raise ToolError("No git origin found. Pass `repo` or set repo_url in cluster.json.")
+    try:
+        branches = list_remote_exp_branches(resolved_repo, run_id=run_id)
+    except MergeError as exc:
+        raise ToolError(str(exc)) from exc
+    if not confirm:
+        return {
+            "repo_url": resolved_repo,
+            "branches": branches,
+            "deleted": False,
+            "next": "Call again with confirm=true to delete these remote branches.",
+        }
+    try:
+        deleted_branches = delete_remote_exp_branches(resolved_repo, branches)
+        deleted_runs = prune_local_runs(keep=keep_runs, run_id=run_id) if prune_runs else []
+    except (MergeError, ValueError) as exc:
+        raise ToolError(str(exc)) from exc
+    return {
+        "repo_url": resolved_repo,
+        "deleted_branches": deleted_branches,
+        "pruned_runs": deleted_runs,
+        "deleted": True,
+    }
+
+
+@app.tool()
+def hive_retry(run_id: Optional[str] = None) -> dict[str, Any]:
+    """Re-dispatch only the `failed` and `unknown` strategies of a saved run (default: latest)."""
+    run, _ = _run_context(run_id)
+    try:
+        config = ClusterConfig.load()
+    except FileNotFoundError:
+        config = None
+    except (ValueError, OSError) as exc:
+        raise ToolError(f"Could not read ~/.hivemind/cluster.json: {exc}") from exc
+    try:
+        run = retry_run(config, run)
+    except DispatchError as exc:
+        raise ToolError(str(exc)) from exc
+    return _run_summary(run)
 
 
 # ---------------------------------------------------------------- discovery

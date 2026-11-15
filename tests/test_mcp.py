@@ -48,6 +48,7 @@ def test_tools_exposed_without_keygen():
     assert set(found) == {
         "hive_list", "hive_check", "hive_runs", "hive_discover", "hive_add_workers",
         "hive_dispatch", "hive_status", "hive_logs", "hive_cancel", "hive_merge",
+        "hive_diff", "hive_clean", "hive_retry",
     }
     # The approval comes from the human through elicitation; the agent cannot pass it.
     assert set(found["hive_add_workers"].input_schema["properties"]) == {"ips", "port"}
@@ -264,3 +265,78 @@ def test_logs_and_runs(fleet_key, fake_http):
 
     is_error, result = call("hive_runs")
     assert result["runs"][0]["statuses"] == {"failed": 1} and result["runs"][0]["prompt"] == "fix the bug"
+
+
+def test_mcp_diff_clean_retry_and_remote_runs(fleet_key, fake_http, origin_repo, tmp_path, git):
+    origin, local = origin_repo
+    branch = f"exp/{RUN_ID}/ari-simd"
+    worker = tmp_path / "w"
+    git(tmp_path, "clone", str(origin), str(worker))
+    git(worker, "checkout", "-b", branch)
+    (worker / "f.py").write_text("x = 42\n", encoding="utf-8")
+    git(worker, "add", "-A")
+    git(worker, "commit", "-m", "hive: simd")
+    git(worker, "push", "origin", branch)
+
+    ClusterConfig(repo_url=str(origin), workers=[ARI]).save()
+    RunState(
+        run_id=RUN_ID,
+        prompt="p",
+        repo_url=str(origin),
+        workers=[
+            WorkerRunState(
+                worker_id="ari",
+                host=ARI.host,
+                agent_engine="aider",
+                strategy="simd",
+                branch=branch,
+                remote_run_dir=f"{RUN_ID}-1",
+                status="succeeded",
+                pushed=True,
+                benchmark_data={"latency_ms": 12.5},
+            ),
+            WorkerRunState(
+                worker_id="ari",
+                host=ARI.host,
+                agent_engine="aider",
+                strategy="slow",
+                branch=f"exp/{RUN_ID}/ari-slow",
+                remote_run_dir=f"{RUN_ID}-2",
+                status="failed",
+                pushed=False,
+            ),
+        ],
+    ).save()
+
+    def handler(request):
+        if request.url.path == "/runs":
+            return httpx.Response(200, json=[{"run_id": "lost-run-1", "status": "succeeded", "strategy": "s1", "branch": "exp/lost-run-1/ari-s1"}])
+        if request.url.path == "/dispatch":
+            return httpx.Response(200, json={"status": "starting"})
+        if request.url.path.endswith("-1"):
+            return httpx.Response(200, json={"status": "succeeded", "branch": branch, "pushed": True, "benchmark_data": {"latency_ms": 12.5}})
+        return httpx.Response(200, json={"status": "failed", "pushed": False})
+
+    fake_http.handler = handler
+
+    is_error, diff_res = call("hive_diff", {"repo_path": str(local), "worker": "ari:simd"})
+    assert not is_error, diff_res
+    assert "x = 42" in diff_res["diff"]
+
+    is_error, r_runs = call("hive_runs", {"remote": True})
+    assert not is_error, r_runs
+    assert r_runs["remote_runs"][0]["run_id"] == "lost-run-1"
+    assert r_runs["remote_runs"][0]["local_known"] is False
+
+    is_error, retried = call("hive_retry", {"run_id": RUN_ID})
+    assert not is_error, retried
+    assert [w["status"] for w in retried["workers"]] == ["succeeded", "starting"]
+
+    is_error, preview_clean = call("hive_clean", {"run_id": RUN_ID, "confirm": False})
+    assert not is_error and preview_clean["deleted"] is False
+    assert branch in preview_clean["branches"]
+
+    is_error, done_clean = call("hive_clean", {"run_id": RUN_ID, "confirm": True})
+    assert not is_error and done_clean["deleted"] is True
+    assert branch in done_clean["deleted_branches"]
+

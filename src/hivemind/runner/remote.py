@@ -213,3 +213,27 @@ def read_worker_result(worker: WorkerNode, run_id: str) -> tuple[str, Optional[d
         return "unknown", None, f"Connection to {worker.host}:{worker.port} refused"
     except Exception as exc:
         return "unknown", None, f"Status poll error: {exc}"
+
+
+def fetch_worker_runs(worker: WorkerNode) -> tuple[Optional[list[dict]], Optional[str]]:
+    """Query GET /runs on a worker daemon. Returns (runs_list, error)."""
+    url = f"http://{worker.host}:{worker.port}/runs"
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.get(url, headers=_get_auth_headers())
+    except httpx.ConnectError:
+        return None, f"Cannot connect to worker at {worker.host}:{worker.port}."
+    except Exception as exc:
+        return None, f"Runs fetch error: {exc}"
+    if resp.status_code == 401:
+        return None, "Unauthorized: Fleet API key rejected by worker."
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code}: {resp.text}"
+    try:
+        data = resp.json()
+    except ValueError:
+        return None, "Worker returned invalid JSON for /runs."
+    if not isinstance(data, list):
+        return None, "Worker returned malformed /runs payload."
+    return [r for r in data if isinstance(r, dict)], None
+
