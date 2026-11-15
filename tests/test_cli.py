@@ -307,6 +307,7 @@ def test_merge_rank_by_diff_clean_retry_and_pr(
     fast_branch = f"exp/{RUN_ID}/ari-fast"
     slow_branch = f"exp/{RUN_ID}/ari-slow"
     push_worker_branch(tmp_path, origin, git, fast_branch, message="hive: fast")
+    (tmp_path / "s").mkdir()
     push_worker_branch(tmp_path / "s", origin, git, slow_branch, message="hive: slow")
 
     run = RunState(
