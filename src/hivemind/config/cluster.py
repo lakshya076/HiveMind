@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 
@@ -66,6 +66,9 @@ class WorkerNode(BaseModel):
     port: int = Field(default=7422, ge=1, le=65535, description="Worker HTTP daemon port (default: 7422)")
     agent_engine: str = Field(default="claude-code", description="AI Coding CLI engine (e.g. claude-code, agy, aider)")
     capabilities: List[str] = Field(default_factory=list, description="Hardware/software tags (e.g. gpu, 32-cores)")
+    _engine_explicit: bool = PrivateAttr(default=False)
+    _model_override: Optional[str] = PrivateAttr(default=None)
+    _strategy_hint: Optional[str] = PrivateAttr(default=None)
 
     @field_validator("host")
     @classmethod

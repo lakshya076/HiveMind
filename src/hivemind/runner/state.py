@@ -74,6 +74,8 @@ class WorkerRunState(BaseModel):
     port: int = Field(default=7422, ge=1, le=65535)
     agent_engine: str
     strategy: str
+    strategy_hint: Optional[str] = None
+    model: Optional[str] = None
     branch: str
     base_branch: Optional[str] = None  # base the worker reports it started from
     remote_run_dir: str = ""
@@ -108,6 +110,7 @@ class RunState(BaseModel):
     test_command: Optional[str] = None
     bench_command: Optional[str] = None
     model: Optional[str] = None
+    timeout: Optional[float] = None
     created_at: str = Field(default_factory=utc_now)
     workers: List[WorkerRunState] = Field(default_factory=list)
 
