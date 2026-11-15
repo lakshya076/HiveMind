@@ -58,4 +58,5 @@ def test_save_and_load_refuse_symlinks(home, tmp_path):
         RunState.load("20261107-120000-symlink1")
     with pytest.raises(ValueError, match="symlink"):
         RunState(run_id="20261107-120000-symlink1", prompt="p", repo_url="r").save()
+    assert RunState.load_all() == []
 

@@ -140,9 +140,14 @@ class RunState(BaseModel):
 
     @classmethod
     def load_all(cls) -> List["RunState"]:
-        """Every saved run, newest first. Unreadable or hand-edited files are skipped."""
+        """Every saved run, newest first. Unreadable, hand-edited or symlinked files are skipped."""
+        runs_dir = get_runs_dir()
+        if runs_dir.is_symlink():
+            return []
         runs: List[RunState] = []
-        for path in get_runs_dir().glob("*.json"):
+        for path in runs_dir.glob("*.json"):
+            if path.is_symlink():
+                continue
             try:
                 runs.append(cls.model_validate_json(path.read_text(encoding="utf-8")))
             except (OSError, ValueError):
